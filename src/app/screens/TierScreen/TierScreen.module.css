@@ -1,0 +1,149 @@
+.header {
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.tierList {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.tierCard {
+  width: 100%;
+  text-align: left;
+  border-radius: 0.5rem;
+  border: 1px solid var(--color-border);
+  padding: 1.25rem;
+  transition: all 0.15s;
+  background: var(--color-bg);
+}
+
+.tierCard:hover {
+  border-color: var(--color-border);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+}
+
+.tierCardSelected {
+  border-color: var(--color-accent);
+  background: rgba(149, 194, 58, 0.05);
+  box-shadow: 0 1px 3px rgba(149, 194, 58, 0.1);
+}
+
+.tierTop {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: 0.5rem;
+}
+
+.tierInfo {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.radio {
+  width: 1rem;
+  height: 1rem;
+  border-radius: 50%;
+  border: 2px solid var(--color-border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: border-color 0.15s;
+}
+
+.radioSelected {
+  border-color: var(--color-accent);
+}
+
+.radioDot {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 50%;
+  background: var(--color-accent);
+}
+
+.tierLabel {
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: var(--color-text);
+}
+
+.badge {
+  margin-left: 0.5rem;
+  font-size: 0.75rem;
+  padding: 0.125rem 0.5rem;
+  border-radius: 0.25rem;
+}
+
+.badgeSelected {
+  background: rgba(149, 194, 58, 0.1);
+  color: var(--color-accent-dark);
+}
+
+.badgeDefault {
+  background: var(--color-bg-alt);
+  color: var(--color-text-muted);
+  border: 1px solid var(--color-border);
+}
+
+.estimate {
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
+  font-family: var(--font-mono), monospace;
+}
+
+.tierDescription {
+  font-size: 0.75rem;
+  color: var(--color-text-secondary);
+  margin-left: 1.75rem;
+}
+
+.chipList {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.375rem;
+  margin-top: 0.75rem;
+  margin-left: 1.75rem;
+}
+
+.chip {
+  font-size: 10px;
+  color: var(--color-text-muted);
+  padding: 0.125rem 0.375rem;
+  background: var(--color-bg-alt);
+  border-radius: 0.25rem;
+  border: 1px solid var(--color-border);
+  font-family: var(--font-mono), monospace;
+}
+
+.chipWillRun {
+  border-color: var(--color-accent);
+  color: var(--color-accent-dark);
+  background: rgba(149, 194, 58, 0.08);
+}
+
+.chipFallback {
+  border-color: var(--color-accent);
+  color: var(--color-accent-dark);
+  background: rgba(149, 194, 58, 0.12);
+}
+
+.chipSkipped {
+  opacity: 0.55;
+}
+
+.chipProgress {
+  margin-left: 0.125rem;
+  opacity: 0.7;
+}
+
+.chipStatus {
+  margin-left: 0.25rem;
+  opacity: 0.8;
+}

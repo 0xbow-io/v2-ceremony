@@ -1,0 +1,101 @@
+.header {
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.inputGroup {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.textarea {
+  width: 100%;
+  height: 10rem;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 0.5rem;
+  padding: 0.75rem 1rem;
+  font-size: 0.75rem;
+  color: var(--color-text);
+  font-family: var(--font-mono), monospace;
+  transition: border-color 0.15s, box-shadow 0.15s;
+  resize: vertical;
+}
+
+.textarea::placeholder {
+  color: var(--color-text-light);
+}
+
+.textarea:focus {
+  outline: none;
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 1px rgba(149, 194, 58, 0.2);
+}
+
+.resultTitle {
+  font-weight: 500;
+  color: var(--color-text);
+}
+
+.resultItem {
+  margin-top: 0.25rem;
+}
+
+.resultHash {
+  margin-top: 0.25rem;
+  font-family: var(--font-mono), monospace;
+  font-size: 11px;
+  color: var(--color-accent);
+  word-break: break-all;
+}
+
+.resultList {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.textareaError {
+  border-color: var(--color-error);
+}
+
+.textareaError:focus {
+  border-color: var(--color-error);
+  box-shadow: 0 0 0 1px rgba(224, 82, 82, 0.25);
+}
+
+.errorCard {
+  display: flex;
+  gap: 0.5rem;
+  align-items: flex-start;
+  background: rgba(224, 82, 82, 0.08);
+  border: 1px solid var(--color-error);
+  border-radius: 0.5rem;
+  padding: 0.75rem 1rem;
+  font-size: 0.75rem;
+  color: var(--color-error);
+}
+
+.errorIcon {
+  flex-shrink: 0;
+  width: 1rem;
+  height: 1rem;
+  margin-top: 0.125rem;
+}
+
+.errorBody {
+  display: flex;
+  flex-direction: column;
+  gap: 0.125rem;
+  min-width: 0;
+  word-break: break-word;
+}
+
+.errorLabel {
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}

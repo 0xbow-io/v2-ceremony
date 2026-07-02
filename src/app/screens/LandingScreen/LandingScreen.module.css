@@ -1,0 +1,104 @@
+.hero {
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  padding-top: 3rem;
+}
+
+.title {
+  font-size: 1.875rem;
+  font-weight: 300;
+  letter-spacing: -0.025em;
+  color: var(--color-text);
+}
+
+.subtitle {
+  font-size: 1.125rem;
+  font-weight: 500;
+  color: var(--color-accent);
+}
+
+.subtitleEnded {
+  font-size: 1.125rem;
+  font-weight: 500;
+  color: var(--color-text-muted);
+}
+
+.description {
+  font-size: 0.875rem;
+  color: var(--color-text-secondary);
+  max-width: 28rem;
+  margin: 0 auto;
+  line-height: 1.6;
+}
+
+.statsBar {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  border: 1px solid var(--color-border);
+  border-radius: 0.5rem;
+  overflow: hidden;
+}
+
+.statCell {
+  background: var(--color-bg);
+  padding: 1.25rem;
+  text-align: center;
+}
+
+.statCellBorder {
+  border-left: 1px solid var(--color-border);
+}
+
+.statValue {
+  font-size: 1.25rem;
+  font-weight: 300;
+  color: var(--color-text);
+}
+
+.statLabel {
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
+  margin-top: 0.25rem;
+}
+
+.authButtons {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.endedCard {
+  text-align: center;
+}
+
+.endedText {
+  font-size: 0.875rem;
+  color: var(--color-text-secondary);
+  line-height: 1.6;
+}
+
+.alreadyContributedCard {
+  text-align: center;
+}
+
+.alreadyContributedTitle {
+  font-size: 1rem;
+  font-weight: 500;
+  color: var(--color-text);
+}
+
+.alreadyContributedText {
+  font-size: 0.875rem;
+  color: var(--color-text-secondary);
+  line-height: 1.6;
+  margin-top: 0.5rem;
+}
+
+.footer {
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
+  text-align: center;
+  line-height: 1.6;
+}

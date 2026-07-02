@@ -1,0 +1,12 @@
+# Single-package repo. pnpm 11 requires a non-empty `packages` field whenever
+# this file exists (its absence is what failed the Vercel build), so the root
+# is declared as the only package.
+packages:
+  - "."
+
+# pnpm 11 blocks dependency build scripts by default (strictDepBuilds). The
+# `allowBuilds` map (which replaced onlyBuiltDependencies/ignoredBuiltDependencies
+# in v11) approves esbuild and sharp to run their native install scripts.
+allowBuilds:
+  esbuild: true
+  sharp: true
