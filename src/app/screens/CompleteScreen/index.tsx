@@ -13,16 +13,20 @@ import styles from "./CompleteScreen.module.css";
 
 export function CompleteScreen({
   receipts,
-  onRestart,
   onVerify,
 }: {
   receipts: ContributionReceiptWithClient[];
-  onRestart: () => void;
   onVerify: () => void;
 }) {
   const config = useCeremonyConfig();
   const { copy } = config;
   const ceremonyName = config.name;
+  // Map circuit id → human label so receipts read "Transact 5×5", not
+  // "transact_5x5".
+  const circuitLabelById = new Map(
+    config.circuits.map((circuit) => [circuit.id, circuit.label]),
+  );
+  const labelFor = (id: string): string => circuitLabelById.get(id) ?? id;
   const {
     receiptPayload,
     latestReceipt,
@@ -33,7 +37,6 @@ export function CompleteScreen({
     handleShare,
   } = useReceiptActions({
     receipts,
-    ceremonyName,
     receiptFilename: copy.complete.receiptFilename,
     shareTemplate: copy.complete.shareTemplate,
   });
@@ -163,7 +166,7 @@ export function CompleteScreen({
               <div className={styles.receiptLeft}>
                 <div className="accentDot" />
                 <span className={styles.receiptCircuit}>
-                  {receipt.circuitId}
+                  {labelFor(receipt.circuitId)}
                 </span>
               </div>
 
@@ -209,7 +212,7 @@ export function CompleteScreen({
                   <div className={styles.receiptLeft}>
                     <div className="accentDot" />
                     <span className={styles.receiptCircuit}>
-                      {receipt.circuitId} #
+                      {labelFor(receipt.circuitId)} #
                       {receipt.contributionIndex.toLocaleString()}
                     </span>
                   </div>
@@ -314,10 +317,6 @@ export function CompleteScreen({
           <p className={styles.thankYouTitle}>{copy.complete.thankYouTitle}</p>
           <p className={styles.thankYouBody}>{copy.complete.thankYouBody}</p>
         </div>
-
-        <Button variant="secondary" size="small" onClick={onRestart}>
-          {copy.complete.restartCta}
-        </Button>
       </div>
     </ScreenWrapper>
   );

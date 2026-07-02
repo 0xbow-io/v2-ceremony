@@ -2,15 +2,13 @@
 
 import { useState } from "react";
 import type { ReceiptResponse } from "@/lib/api";
-import { formatTemplate } from "@/utils/format";
 
 export function useReceiptActions(options: {
   receipts: ReceiptResponse[];
-  ceremonyName: string;
   receiptFilename: string;
   shareTemplate: string;
 }) {
-  const { receipts, ceremonyName, receiptFilename, shareTemplate } = options;
+  const { receipts, receiptFilename, shareTemplate } = options;
   const [copied, setCopied] = useState(false);
 
   const latestReceipt = receipts[receipts.length - 1];
@@ -45,16 +43,9 @@ export function useReceiptActions(options: {
 
   const handleShare = () => {
     if (!latestReceipt) return;
-    const text = formatTemplate(shareTemplate, {
-      ceremonyName,
-      circuitId: latestReceipt.circuitId,
-      contributionIndex: String(latestReceipt.contributionIndex),
-    });
-    const ceremonyUrl = window.location.origin;
-    const intentUrl =
-      `https://x.com/intent/tweet` +
-      `?text=${encodeURIComponent(text)}` +
-      `&url=${encodeURIComponent(ceremonyUrl)}`;
+    // The share text carries its own call-to-action URL, so no separate &url=
+    // param (which would append the current origin as a second, wrong link).
+    const intentUrl = `https://x.com/intent/tweet?text=${encodeURIComponent(shareTemplate)}`;
     window.open(intentUrl, "_blank", "noopener,noreferrer");
   };
 

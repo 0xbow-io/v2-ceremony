@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { Header } from "./components/Header";
 import { LandingScreen } from "./screens/LandingScreen";
@@ -51,6 +51,30 @@ export default function CeremonyPage() {
     active: step === "progress",
   });
 
+  // Auto-advance to the Complete screen the moment the last contribution
+  // finishes. The user should not have to click through: by the time the flow
+  // is finalizeReady all the compute is already done, and the receipts +
+  // attestation options live on Complete — a missed click would strand them.
+  useEffect(() => {
+    if (step === "progress" && contribution.finalizeReady) {
+      setStep("complete");
+    }
+  }, [step, contribution.finalizeReady]);
+
+  // Guard against accidentally closing/navigating away mid-contribution. A run
+  // takes 30–60 minutes and lives entirely in this tab, so a stray ⌘W or back
+  // gesture would throw away all progress. The native prompt only fires while a
+  // contribution is actually in progress.
+  useEffect(() => {
+    if (step !== "progress") return;
+    const handleBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => window.removeEventListener("beforeunload", handleBeforeUnload);
+  }, [step]);
+
   const handleAuth = (method: "github") => {
     if (status && !status.isActive) return;
     authenticate(method);
@@ -85,13 +109,6 @@ export default function CeremonyPage() {
       joiningRef.current = false;
       setIsJoining(false);
     }
-  };
-
-  const resetFlow = () => {
-    entropySeed?.fill(0);
-    setEntropySeed(null);
-    contribution.reset();
-    setStep("landing");
   };
 
   const handleCancelContribution = () => {
@@ -223,13 +240,12 @@ export default function CeremonyPage() {
                 }
                 phase={contribution.contributionPhase}
                 progress={contribution.contributionProgress}
+                etaSecondsRemaining={contribution.estimatedSecondsRemaining}
                 error={contribution.contributionError ?? contribution.queueError}
                 autoRetrying={contribution.autoRetrying}
                 autoRetryMessage={contribution.autoRetryMessage}
                 autoRetryAttempt={contribution.autoRetryAttempt}
                 autoRetryMax={contribution.autoRetryMax}
-                finalizeEnabled={contribution.finalizeReady}
-                onFinalize={() => setStep("complete")}
                 onRetry={contribution.retry}
                 onCancel={handleCancelContribution}
               />
@@ -238,7 +254,6 @@ export default function CeremonyPage() {
             {step === "complete" && (
               <CompleteScreen
                 receipts={contribution.receipts}
-                onRestart={resetFlow}
                 onVerify={() => setStep("verify")}
               />
             )}

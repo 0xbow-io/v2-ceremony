@@ -78,17 +78,26 @@ export function LandingScreen({
   ];
 
   if (!isActive) {
+    // Distinguish "contributions closed, still finalizing" from "fully
+    // finalized". Only the beacon-applied state should read as truly done.
+    const isFinalized = status?.beaconApplied ?? false;
+    const endedSubtitle = isFinalized
+      ? copy.landing.endedSubtitle
+      : copy.landing.closedSubtitle;
+    const endedDescription = isFinalized
+      ? copy.landing.endedDescription
+      : copy.landing.closedDescription;
     return (
       <ScreenWrapper className="screenLayout">
         <div className={styles.hero}>
           <h1 className={styles.title}>{copy.landing.title}</h1>
-          <h2 className={styles.subtitleEnded}>{copy.landing.endedSubtitle}</h2>
+          <h2 className={styles.subtitleEnded}>{endedSubtitle}</h2>
         </div>
 
         <StatsBar stats={statsData} />
 
         <div className={cn("card", styles.endedCard)}>
-          <p className={styles.endedText}>{copy.landing.endedDescription}</p>
+          <p className={styles.endedText}>{endedDescription}</p>
         </div>
 
         <Button onClick={onVerify}>{copy.landing.verifyCta}</Button>
@@ -105,6 +114,11 @@ export function LandingScreen({
       </div>
 
       <StatsBar stats={statsData} />
+
+      <div className={cn("card", styles.timeNotice)}>
+        <p className={styles.timeNoticeTitle}>{copy.landing.timeNoticeTitle}</p>
+        <p className={styles.timeNoticeBody}>{copy.landing.timeNoticeBody}</p>
+      </div>
 
       {!isAuthenticated && (
         <>

@@ -13,9 +13,9 @@ const mono = IBM_Plex_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "ppv2-tsc-test",
+  title: "Privacy Pools V2 · Trusted Setup Ceremony",
   description:
-    "Contribute your randomness to strengthen a trusted setup ceremony.",
+    "Contribute your randomness to strengthen the Privacy Pools V2 trusted setup ceremony.",
 };
 
 export default function RootLayout({

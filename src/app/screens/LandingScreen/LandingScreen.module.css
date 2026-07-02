@@ -79,6 +79,24 @@
   line-height: 1.6;
 }
 
+.timeNotice {
+  border-left: 3px solid var(--color-accent);
+  text-align: center;
+}
+
+.timeNoticeTitle {
+  font-size: 0.9375rem;
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.timeNoticeBody {
+  font-size: 0.8125rem;
+  color: var(--color-text-secondary);
+  line-height: 1.6;
+  margin-top: 0.375rem;
+}
+
 .alreadyContributedCard {
   text-align: center;
 }

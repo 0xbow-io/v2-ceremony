@@ -2,7 +2,7 @@ import type { CeremonyCopy } from "./types/ceremony";
 
 export const defaultCopy: CeremonyCopy = {
   header: {
-    title: "TRUSTED SETUP CEREMONY",
+    title: "PRIVACY POOLS V2 · TRUSTED SETUP",
     contributionsLabel: "contributions",
     steps: {
       landing: "Welcome",
@@ -14,10 +14,10 @@ export const defaultCopy: CeremonyCopy = {
     },
   },
   landing: {
-    title: "Trusted Setup Ceremony",
-    subtitle: "Contribute your randomness",
+    title: "Privacy Pools V2",
+    subtitle: "Trusted Setup Ceremony",
     description:
-      "Your contribution strengthens the ceremony. Only one honest participant is needed.",
+      "Contribute your randomness to the Privacy Pools V2 trusted setup. Your contribution strengthens the ceremony — only one honest participant is needed.",
     stats: {
       contributionsLabel: "Contributors",
       circuitsLabel: "Circuits",
@@ -29,15 +29,21 @@ export const defaultCopy: CeremonyCopy = {
     eligibilityLoadingCta: "CHECKING ELIGIBILITY...",
     downloadReceiptsCta: "DOWNLOAD MY RECEIPTS",
     downloadingReceiptsCta: "PREPARING DOWNLOAD...",
+    timeNoticeTitle: "Set aside 30–60 minutes",
+    timeNoticeBody:
+      "Contributing to all circuits takes roughly 30 to 60 minutes and runs entirely in your browser. Use a desktop browser, and keep this tab open and your device awake until you are finished.",
     alreadyContributedTitle: "You have already contributed",
     alreadyContributedDescription:
       "This GitHub account has contributed to every available circuit. You can still verify your receipts.",
-    endedSubtitle: "This ceremony has concluded",
+    closedSubtitle: "Contributions are closed",
+    closedDescription:
+      "The ceremony has reached its target and is no longer accepting contributions. It is now being finalized — the final parameters and verification beacon are being prepared. You can verify existing receipts below.",
+    endedSubtitle: "This ceremony is complete",
     endedDescription:
-      "Thank you to everyone who contributed. The ceremony has reached its target. You can still verify existing receipts below.",
+      "Thank you to everyone who contributed. The final parameters and verification beacon have been published. You can still verify existing receipts below.",
     verifyCta: "VERIFY A RECEIPT",
     footer:
-      "GitHub sign-in required to prevent spam. No other data collected.\nTakes ~1 minute for core circuits.",
+      "GitHub sign-in required to prevent spam. No other data collected.",
   },
   entropy: {
     topBarTitle: "ENTROPY COLLECTION",
@@ -69,8 +75,11 @@ export const defaultCopy: CeremonyCopy = {
     listTitle: "Your circuits",
     activeTitle: "Active circuit",
     constraintsLabel: "constraints",
-    queuePositionLabel: "Queue position",
+    queueAhead: "{{count}} ahead of you in line",
+    queueNext: "You're next in line",
     etaLabel: "ETA",
+    etaEstimating: "Estimating time remaining…",
+    etaRemaining: "≈ {{time}} remaining",
     statusLabels: {
       waiting: "Waiting",
       active: "Active",
@@ -89,7 +98,6 @@ export const defaultCopy: CeremonyCopy = {
       uploading: "Uploading result...",
       verifying: "Verifying contribution on the server...",
     },
-    finalizeCta: "FINALIZE CONTRIBUTION",
     retryCta: "Retry",
     cancelCta: "Cancel",
     errorTitle: "Contribution failed",
@@ -110,7 +118,7 @@ export const defaultCopy: CeremonyCopy = {
     shareCta: "Share on X",
     receiptFilename: "ceremony-receipt.json",
     shareTemplate:
-      "I just contributed to {{ceremonyName}}: {{circuitId}} #{{contributionIndex}}",
+      "I just contributed to the Privacy Pools V2 Trusted Setup Ceremony 🔒\nIt's effortless and helps secure the future of privacy on Ethereum!\nParticipate at: ceremony.privacypools.com",
     toxicTitle: "Toxic waste destroyed",
     toxicBody:
       "Your secret randomness was generated in memory, used to transform the circuit keys, and immediately zeroed. No entropy was written to disk or transmitted to the coordinator.",
@@ -122,7 +130,6 @@ export const defaultCopy: CeremonyCopy = {
     thankYouTitle: "Thank you for strengthening the ceremony.",
     thankYouBody:
       "Only one honest participant is needed. You might be that one.",
-    restartCta: "CONTRIBUTE AGAIN (DIFFERENT TIER)",
     attestationTitle: "Publish an attestation (optional)",
     attestationBody:
       "Publish a public GitHub Gist — one click, using your GitHub login — leaving a timestamped record that your contribution happened. Voluntary; it proves inclusion, not honesty.",

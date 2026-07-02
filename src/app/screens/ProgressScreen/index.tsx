@@ -3,7 +3,6 @@
 import { useCeremonyConfig } from "@/hooks/useCeremonyConfig";
 import { cn } from "@/utils/cn";
 import { formatTemplate } from "@/utils/format";
-import { Button } from "@/app/components/Button";
 import { ScreenWrapper } from "@/app/components/ScreenWrapper";
 import styles from "./ProgressScreen.module.css";
 
@@ -45,13 +44,12 @@ export function ProgressScreen({
   activeCircuit,
   phase,
   progress,
+  etaSecondsRemaining,
   error,
   autoRetrying,
   autoRetryMessage,
   autoRetryAttempt,
   autoRetryMax,
-  finalizeEnabled,
-  onFinalize,
   onRetry,
   onCancel,
 }: {
@@ -59,20 +57,36 @@ export function ProgressScreen({
   activeCircuit: ActiveCircuitInfo | null;
   phase: ContribPhase;
   progress: number;
+  etaSecondsRemaining: number | null;
   error: string | null;
   autoRetrying: boolean;
   autoRetryMessage: string | null;
   autoRetryAttempt: number;
   autoRetryMax: number;
-  finalizeEnabled: boolean;
-  onFinalize: () => void;
   onRetry: () => void;
   onCancel: () => void;
 }) {
   const { copy } = useCeremonyConfig();
   const barProgress = Math.min(progress, 100);
-  const showActive = Boolean(activeCircuit);
   const phaseStatus = copy.progress.phaseStatus[phase];
+
+  // The current circuit is either waiting in the queue or actively computing.
+  // Compute phases (phase bar, progress, ETA) belong to the computing state;
+  // the queue banner belongs to the waiting state.
+  const currentRun = activeCircuit
+    ? circuits.find((circuit) => circuit.id === activeCircuit.id)
+    : undefined;
+  const isComputing = Boolean(activeCircuit) && currentRun?.status === "active";
+  const isWaitingInLine =
+    Boolean(activeCircuit) && currentRun?.status === "waiting";
+
+  // "You're next" at the front of the line, otherwise "N ahead of you".
+  const queueText = (position: number): string =>
+    position <= 1
+      ? copy.progress.queueNext
+      : formatTemplate(copy.progress.queueAhead, {
+          count: String(position - 1),
+        });
 
   return (
     <ScreenWrapper className="screenLayout">
@@ -107,9 +121,18 @@ export function ProgressScreen({
         </div>
       )}
 
-      {showActive && <div className={styles.processingIndicator} />}
+      {isWaitingInLine && currentRun?.position != null && (
+        <div className={styles.queueBanner}>
+          <div className={styles.queueSpinner} />
+          <span className={styles.queueBannerText}>
+            {queueText(currentRun.position)}
+          </span>
+        </div>
+      )}
 
-      {showActive && (
+      {isComputing && <div className={styles.processingIndicator} />}
+
+      {isComputing && (
         <div className={styles.phaseBar}>
           {PHASE_ORDER.map(
             (p, i) => {
@@ -154,7 +177,7 @@ export function ProgressScreen({
         </div>
       )}
 
-      {showActive && (
+      {isComputing && (
         <div className={styles.progressSection}>
           <div className={styles.progressTrack}>
             <div
@@ -165,6 +188,13 @@ export function ProgressScreen({
           <div className={styles.progressMeta}>
             <span>{phaseStatus}</span>
             <span>{Math.min(Math.floor(barProgress), 100)}%</span>
+          </div>
+          <div className={styles.eta}>
+            {etaSecondsRemaining === null
+              ? copy.progress.etaEstimating
+              : formatTemplate(copy.progress.etaRemaining, {
+                  time: formatDuration(etaSecondsRemaining),
+                })}
           </div>
         </div>
       )}
@@ -186,16 +216,9 @@ export function ProgressScreen({
                 {copy.progress.statusLabels[circuit.status]}
               </span>
 
-              {circuit.status === "waiting" && circuit.position && (
-                <span>
-                  {copy.progress.queuePositionLabel} #{circuit.position}
-                </span>
+              {circuit.status === "waiting" && circuit.position != null && (
+                <span>{queueText(circuit.position)}</span>
               )}
-
-              {/* ETA hidden: the current estimate is a flat position*60s
-                  placeholder, not per-circuit. The plumbing (etaSeconds /
-                  estimatedWaitSeconds) is kept so it can be re-shown once real
-                  per-circuit estimates exist. */}
             </div>
           </div>
         ))}
@@ -230,14 +253,19 @@ export function ProgressScreen({
           </div>
         </div>
       )}
-
-      {finalizeEnabled && (
-        <Button variant="accent" onClick={onFinalize}>
-          {copy.progress.finalizeCta}
-        </Button>
-      )}
     </ScreenWrapper>
   );
+}
+
+// Human-friendly duration for the live ETA: "<1 min", "12 min", "1 hr 5 min".
+function formatDuration(totalSeconds: number): string {
+  const seconds = Math.round(totalSeconds);
+  if (seconds < 60) return "<1 min";
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes} min`;
+  const hours = Math.floor(minutes / 60);
+  const remMinutes = minutes % 60;
+  return remMinutes ? `${hours} hr ${remMinutes} min` : `${hours} hr`;
 }
 
 function StatusIcon({ status }: { status: CircuitRunStatus }) {

@@ -28,6 +28,33 @@
   color: var(--color-text-muted);
 }
 
+.queueBanner {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 0.75rem 1rem;
+  border: 1px solid var(--color-border);
+  border-radius: 0.5rem;
+  background: var(--color-bg);
+}
+
+.queueBannerText {
+  font-size: 0.9375rem;
+  font-weight: 500;
+  color: var(--color-text);
+}
+
+.queueSpinner {
+  width: 0.875rem;
+  height: 0.875rem;
+  border: 2px solid var(--color-border);
+  border-top-color: var(--color-accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  flex-shrink: 0;
+}
+
 .completedTitle {
   color: var(--color-accent);
   font-weight: 500;
@@ -139,6 +166,14 @@
   justify-content: space-between;
   font-size: 0.75rem;
   color: var(--color-text-muted);
+}
+
+.eta {
+  margin-top: 0.5rem;
+  text-align: center;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  color: var(--color-text-secondary);
 }
 
 .circuitList {
