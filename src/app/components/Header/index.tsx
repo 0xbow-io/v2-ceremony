@@ -4,6 +4,7 @@ import type { CeremonyStep } from "@/lib/ceremony-config";
 import { useCeremonyConfig } from "@/hooks/useCeremonyConfig";
 import { useCeremonyStatus } from "@/hooks/useCeremonyStatus";
 import { useParticipant } from "@/hooks/useParticipant";
+import { Logo } from "@/app/components/Logo";
 import styles from "./Header.module.css";
 
 export function Header({
@@ -17,18 +18,13 @@ export function Header({
   const { isAuthenticated, participantName } = useParticipant();
 
   const { copy } = config;
-  const shortName = config.branding.shortName;
   const totalContributions = status?.totalContributions;
   const displayName = isAuthenticated ? participantName : undefined;
 
   return (
     <header className={styles.header}>
       <button onClick={onLogoClick} className={styles.logoButton}>
-        <div className={styles.logoIcon}>
-          <span className={styles.logoText}>
-            {shortName ?? "TS"}
-          </span>
-        </div>
+        <Logo className={styles.logoIcon} />
         <div className={styles.logoDivider} />
         <span className={styles.title}>{copy.header.title}</span>
       </button>

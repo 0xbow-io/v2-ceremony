@@ -52,6 +52,9 @@ export interface ContributionFlowState {
   currentCircuitIndex: number;
   currentCircuitId: string | null;
   currentCircuit: ClientCircuitConfig | undefined;
+  // Estimated seconds until the whole contribution finishes, derived from the
+  // user's measured throughput. Null while there is no rate to extrapolate yet.
+  estimatedSecondsRemaining: number | null;
   contributionPhase: ContribPhase;
   contributionProgress: number;
   contributionError: string | null;
@@ -146,6 +149,29 @@ export function useContributionFlow(options: {
 
   const contributionAbortRef = useRef<AbortController | null>(null);
 
+  // --- Live ETA timing ---
+  // Measures the user's actual throughput (circuit constraints processed per
+  // millisecond) from completed circuits, then extrapolates over the remaining
+  // ones. This is hardware-adaptive: a slow machine simply measures a slower
+  // rate. circuitComputeStartRef marks when the active circuit's work began;
+  // on completion its elapsed time and constraint weight fold into the running
+  // totals below.
+  const circuitComputeStartRef = useRef<number | null>(null);
+  const measuredComputeMsRef = useRef(0);
+  const measuredWeightRef = useRef(0);
+
+  const parseConstraints = (value: string): number =>
+    Number(value.replace(/[^0-9]/g, "")) || 0;
+  const weightById = new Map(
+    circuits.map((circuit) => [circuit.id, parseConstraints(circuit.constraints)]),
+  );
+
+  const resetEtaTracking = useCallback(() => {
+    circuitComputeStartRef.current = null;
+    measuredComputeMsRef.current = 0;
+    measuredWeightRef.current = 0;
+  }, []);
+
   const activeCircuitIds =
     resolvedCircuitIds.length > 0 ? resolvedCircuitIds : selectedCircuitIds;
   const currentCircuitId = activeCircuitIds[currentCircuitIndex] ?? null;
@@ -185,6 +211,7 @@ export function useContributionFlow(options: {
       setQueueError(null);
       setContributionPhase("downloading");
       setContributionProgress(0);
+      circuitComputeStartRef.current = Date.now();
 
       const zkeyInfo = await getZkeyInfo(circuitId, controller.signal);
       const zkeyResponse = await fetch(zkeyInfo.url, {
@@ -267,6 +294,14 @@ export function useContributionFlow(options: {
     },
     onSuccess: (receipt) => {
       const circuitId = receipt.circuitId;
+
+      // Fold this circuit's real elapsed time + constraint weight into the
+      // running totals that drive the ETA.
+      if (circuitComputeStartRef.current !== null) {
+        measuredComputeMsRef.current += Date.now() - circuitComputeStartRef.current;
+        measuredWeightRef.current += weightById.get(circuitId) ?? 0;
+        circuitComputeStartRef.current = null;
+      }
 
       clearAutoRetry();
       setReceipts((prev) => [...prev, receipt]);
@@ -494,6 +529,7 @@ export function useContributionFlow(options: {
     setContributionError(null);
     setReceipts([]);
     clearAutoRetry();
+    resetEtaTracking();
     contributeMutation.reset();
     queryClient.removeQueries({ queryKey: ["queuePosition"] });
     setFlowRunId((value) => value + 1);
@@ -546,15 +582,41 @@ export function useContributionFlow(options: {
     setContributionError(null);
     setReceipts([]);
     clearAutoRetry();
+    resetEtaTracking();
     contributeMutation.reset();
     queryClient.removeQueries({ queryKey: ["queuePosition"] });
   };
+
+  // Live ETA: remaining constraint weight ÷ measured throughput. The active
+  // circuit counts only its not-yet-done fraction (via contributionProgress) so
+  // the estimate ticks down smoothly. Null until at least one circuit has
+  // finished (no rate to extrapolate from yet) — the UI shows "estimating".
+  const ratePerMs =
+    measuredComputeMsRef.current > 0
+      ? measuredWeightRef.current / measuredComputeMsRef.current
+      : 0;
+  let remainingWeight = 0;
+  for (const run of circuitRuns) {
+    if (run.status === "done") continue;
+    const weight = weightById.get(run.id) ?? 0;
+    if (run.status === "active") {
+      const fraction = Math.min(Math.max(contributionProgress, 0), 100) / 100;
+      remainingWeight += weight * (1 - fraction);
+    } else {
+      remainingWeight += weight;
+    }
+  }
+  const estimatedSecondsRemaining =
+    ratePerMs > 0 && circuitRuns.length > 0 && !finalizeReady
+      ? Math.max(0, remainingWeight / ratePerMs / 1000)
+      : null;
 
   return {
     circuitRuns,
     currentCircuitIndex,
     currentCircuitId,
     currentCircuit,
+    estimatedSecondsRemaining,
     contributionPhase,
     contributionProgress,
     contributionError,

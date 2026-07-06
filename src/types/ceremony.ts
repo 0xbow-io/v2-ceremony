@@ -59,8 +59,15 @@ export interface CeremonyCopy {
     eligibilityLoadingCta: string;
     downloadReceiptsCta: string;
     downloadingReceiptsCta: string;
+    timeNoticeTitle: string;
+    timeNoticeBody: string;
     alreadyContributedTitle: string;
     alreadyContributedDescription: string;
+    // Shown when contributions have stopped but the ceremony is NOT yet
+    // finalized (beacon not applied) — makes clear that work remains.
+    closedSubtitle: string;
+    closedDescription: string;
+    // Shown only once the ceremony is fully finalized (beacon applied).
     endedSubtitle: string;
     endedDescription: string;
     verifyCta: string;
@@ -94,8 +101,11 @@ export interface CeremonyCopy {
     listTitle: string;
     activeTitle: string;
     constraintsLabel: string;
-    queuePositionLabel: string;
+    queueAhead: string;
+    queueNext: string;
     etaLabel: string;
+    etaEstimating: string;
+    etaRemaining: string;
     statusLabels: {
       waiting: string;
       active: string;
@@ -114,7 +124,6 @@ export interface CeremonyCopy {
       uploading: string;
       verifying: string;
     };
-    finalizeCta: string;
     retryCta: string;
     cancelCta: string;
     errorTitle: string;
@@ -140,7 +149,6 @@ export interface CeremonyCopy {
     toxicTags: string[];
     thankYouTitle: string;
     thankYouBody: string;
-    restartCta: string;
     attestationTitle: string;
     attestationBody: string;
     attestationPublishCta: string;

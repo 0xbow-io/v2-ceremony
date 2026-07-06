@@ -67,19 +67,9 @@
 .logoIcon {
   width: 1.75rem;
   height: 1.75rem;
-  background: var(--color-text);
-  border-radius: 0.25rem;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  display: block;
+  color: var(--color-text);
   flex-shrink: 0;
-}
-
-.logoText {
-  color: var(--color-bg);
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: -0.025em;
 }
 
 .divider {

@@ -7,6 +7,7 @@ import { useCeremonyStatus } from "@/hooks/useCeremonyStatus";
 import { useParticipant } from "@/hooks/useParticipant";
 import { useEntropyCollector } from "@/hooks/useEntropyCollector";
 import { cn } from "@/utils/cn";
+import { Logo } from "@/app/components/Logo";
 import styles from "./EntropyScreen.module.css";
 
 export function EntropyScreen({
@@ -19,7 +20,6 @@ export function EntropyScreen({
   const { isAuthenticated, participantName } = useParticipant();
 
   const { copy } = config;
-  const shortName = config.branding.shortName;
   const totalContributions = status?.totalContributions;
   const displayName = isAuthenticated ? participantName : undefined;
   const {
@@ -113,9 +113,7 @@ export function EntropyScreen({
       <div className={styles.topBarWrapper}>
         <div className={styles.topBar}>
           <div className={styles.topBarLeft}>
-            <div className={styles.logoIcon}>
-              <span className={styles.logoText}>{shortName}</span>
-            </div>
+            <Logo className={styles.logoIcon} />
             <div className={styles.logoDivider} />
             <span className={styles.topBarTitle}>{copy.entropy.topBarTitle}</span>
           </div>
