@@ -1,0 +1,147 @@
+# Privacy Pools V2 — Trusted Setup Ceremony · Agent Runbook
+
+You are an autonomous agent (e.g. `codex`). This file tells you how to make a
+valid contribution to this Groth16 Phase-2 trusted setup ceremony **headlessly**
+— no browser, no GitHub login, no human. You authenticate with a keypair you
+generate, and your randomness comes from the operating system CSPRNG (the
+`/dev/urandom` / `getentropy` / `BCryptGenRandom` equivalent), never from mouse
+movement.
+
+Contributing can only HELP the ceremony: your fresh randomness is mixed in and
+the setup stays secure as long as at least one participant (you, or anyone
+before you) was honest. You cannot corrupt it by participating.
+
+--------------------------------------------------------------------------------
+## 0. Facts you need
+
+- BASE_URL = the origin serving this file. Example: https://ppv2-tsc-test.vercel.app
+- Requirements: Node.js >= 20 and `npx` (installs the CLI on demand). ~4 GB free
+  RAM and a few GB of disk for the zkey files. Network access to BASE_URL and npm.
+- Time budget: the contribution COMPUTE runs locally and is slow — it can take up
+  to ~1 hour for the full circuit set on a laptop. Plan for a long-running job and
+  keep a progress log (Step 3).
+
+--------------------------------------------------------------------------------
+## 1. Check the ceremony is open
+
+```bash
+curl -s "$BASE_URL/api/ceremony/status" | head -c 400
+```
+
+Look at `isActive`. If it is `false` (target reached, finalized, or past its end
+date) you cannot contribute — stop and report that the ceremony is closed. If
+`true`, continue.
+
+--------------------------------------------------------------------------------
+## 2. Authenticate with a generated keypair (no GitHub)
+
+Write this to `agent-auth.mjs` and run `node agent-auth.mjs`. It generates a
+fresh Ed25519 keypair, signs the server's challenge, and prints a Caburé Bearer
+JWT (valid 7 days). Save the JWT.
+
+```js
+// agent-auth.mjs
+import { generateKeyPairSync, sign } from "node:crypto";
+
+const BASE = process.env.BASE_URL;                       // e.g. https://ppv2-tsc-test.vercel.app
+if (!BASE) throw new Error("set BASE_URL");
+
+// 1) discover the exact challenge format (slug is domain-separation)
+const info = await (await fetch(`${BASE}/api/ceremony/auth/wallet`)).json();
+if (info.error) throw new Error(`agent auth unavailable: ${info.error}`);
+
+// 2) generate a keypair, sign `cabure-agent-auth:<slug>:<unix-seconds>`
+const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+const timestamp = Math.floor(Date.now() / 1000);
+const message = info.challengeTemplate.replace("<unix-seconds>", String(timestamp));
+const publicKeyB64 = publicKey.export({ format: "der", type: "spki" }).toString("base64");
+const signature = sign(null, Buffer.from(message), privateKey).toString("base64");
+
+// 3) exchange the signed challenge for a JWT
+const res = await fetch(`${BASE}/api/ceremony/auth/wallet`, {
+  method: "POST",
+  headers: { "content-type": "application/json" },
+  body: JSON.stringify({ publicKey: publicKeyB64, signature, timestamp }),
+});
+const out = await res.json();
+if (!res.ok) throw new Error(`auth failed (${res.status}): ${out.error ?? ""}`);
+console.log(out.token);          // <-- the Bearer JWT; also out.participantId
+```
+
+```bash
+export BASE_URL="https://ppv2-tsc-test.vercel.app"       # or your deployment's origin
+CABURE_TOKEN="$(node agent-auth.mjs)"
+echo "got token: ${CABURE_TOKEN:0:24}..."
+```
+
+If the discovery request returns `{"error": ...}` with HTTP 404, the operator
+has not enabled agent auth (they must set `ALLOW_AGENT_AUTH=1`). In that case,
+fall back to the human GitHub device flow (`npx @wonderland/cabure-cli
+contribute <url>` with no `--token`) or report that agent auth is disabled.
+
+--------------------------------------------------------------------------------
+## 3. Contribute (headless, OS entropy, progressable)
+
+The official CLI, `@wonderland/cabure-cli`, does the whole flow for every
+circuit: joins the queue, downloads + hash-verifies the current zkey, draws 64
+bytes from the OS CSPRNG (`node:crypto.randomBytes` — this is your "system
+entropy instead of mouse"), runs `zKey.contribute()`, uploads, and submits.
+
+Run it with your token and tee the output to a log file so progress is queryable
+while it runs:
+
+```bash
+npx --yes @wonderland/cabure-cli@latest contribute "$BASE_URL" \
+  --token "$CABURE_TOKEN" 2>&1 | tee cabure-progress.log
+```
+
+The CLI prints a line per phase per circuit — `Queue`, `Download`, `Entropy`,
+`Contributing`, `Upload`, `Submit`. To watch progress from another shell:
+
+```bash
+tail -f cabure-progress.log
+```
+
+Report your progress as you go: after each circuit's `Submit` line, note which
+circuit finished and how many remain (from the `[k/N]` counter). Do not abort a
+`Contributing` step — that is the slow zk compute; let it finish.
+
+Scope options (optional):
+- `--circuit <id>` — contribute to a single circuit only (fast; good for a smoke test).
+- `--tier <id>`    — contribute to one tier's circuits.
+- default          — every circuit you are still eligible for.
+
+For a quick end-to-end check before committing an hour, contribute to just the
+smallest circuit first:
+
+```bash
+npx --yes @wonderland/cabure-cli@latest contribute "$BASE_URL" \
+  --token "$CABURE_TOKEN" --circuit deposit 2>&1 | tee cabure-deposit.log
+```
+
+--------------------------------------------------------------------------------
+## 4. Confirm your contribution
+
+On success the CLI prints a receipt per circuit (participantId, contribution
+index, contribution hash `h_k`, chain hash). Verify any receipt against the
+server:
+
+```bash
+curl -s "$BASE_URL/api/ceremony/receipt?circuitId=deposit&participantId=<yourId>&contributionIndex=<n>" | head -c 400
+```
+
+Your `participantId` is `agent:<fingerprint>` (also printed by `agent-auth.mjs`
+as `out.participantId`). Save the receipts JSON as your proof of inclusion.
+
+--------------------------------------------------------------------------------
+## 5. Notes
+
+- Entropy: randomness is the OS CSPRNG only. Nothing reads mouse/keyboard. The
+  keypair from Step 2 is an auth identity, not the contribution randomness.
+- Toxic waste: the CLI never persists the secret it derives; it exists only in
+  memory during `Contributing`.
+- Attestation (optional): publishing a GitHub Gist attestation is a browser-only
+  convenience and is not available to a headless agent. The receipt (Step 4) is
+  your public, verifiable proof of inclusion; publish it wherever you like.
+- Idempotence: you can only contribute once per circuit. Re-running skips
+  circuits you already did.

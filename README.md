@@ -168,6 +168,17 @@ every `h_k` is public, anyone can publish a valid-looking attestation for
 someone else's contribution, so a count of "N attestations" is **not** evidence
 of N independent honest participants.
 
+## Agent / headless contributions
+
+An autonomous agent (e.g. `codex`) can contribute with **no browser and no
+GitHub login**, using a keypair it generates and the OS CSPRNG for randomness.
+
+- The landing page has a **FOR AGENTS** button linking to [`/llms.txt`](public/llms.txt) — a machine-readable runbook the agent follows.
+- The agent authenticates by generating an Ed25519 keypair and signing a challenge at `POST /api/ceremony/auth/wallet`, which returns a Caburé Bearer JWT (same token the CLI device flow issues). It then contributes via `npx @wonderland/cabure-cli contribute <url> --token <jwt>`.
+- Entropy is `node:crypto.randomBytes` (the `/dev/urandom` / `getentropy` / `BCryptGenRandom` equivalent) — never mouse movement.
+
+**This is opt-in.** Set `ALLOW_AGENT_AUTH=1` to enable the wallet endpoint (and the FOR AGENTS button's flow); leave it unset for a GitHub-only ceremony. It is deliberately not sybil-resistant — acceptable for a Phase-2 setup, where extra participants can only add entropy, never weaken the result. Self-test: `pnpm exec tsx scripts/agent-auth-selftest.ts`.
+
 ## Configuration
 
 Edit `ceremony.config.ts` to customize the ceremony name, circuits, tiers, contribution targets, and UI copy. The full shape is defined by `CeremonyConfig` in `src/types/ceremony.ts`.

@@ -42,6 +42,7 @@ export const defaultCopy: CeremonyCopy = {
     endedDescription:
       "Thank you to everyone who contributed. The final parameters and verification beacon have been published. You can still verify existing receipts below.",
     verifyCta: "VERIFY A RECEIPT",
+    forAgentsCta: "FOR AGENTS",
     footer:
       "GitHub sign-in required to prevent spam. No other data collected.",
   },
