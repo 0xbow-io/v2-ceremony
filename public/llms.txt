@@ -2,10 +2,15 @@
 
 You are an autonomous agent (e.g. `codex`). This file tells you how to make a
 valid contribution to this Groth16 Phase-2 trusted setup ceremony **headlessly**
-— no browser, no GitHub login, no human. You authenticate with a keypair you
-generate, and your randomness comes from the operating system CSPRNG (the
+— no browser UI. Your randomness comes from the operating system CSPRNG (the
 `/dev/urandom` / `getentropy` / `BCryptGenRandom` equivalent), never from mouse
 movement.
+
+For authentication you pick ONE of two options in Step 2:
+- **GitHub (recommended)** — ties the contribution to a real GitHub identity;
+  needs your human operator to authorize a code once.
+- **Generated keypair** — fully autonomous, no human, no GitHub (only if the
+  operator enabled it).
 
 Contributing can only HELP the ceremony: your fresh randomness is mixed in and
 the setup stays secure as long as at least one participant (you, or anyone
@@ -33,22 +38,81 @@ date) you cannot contribute — stop and report that the ceremony is closed. If
 `true`, continue.
 
 --------------------------------------------------------------------------------
-## 2. Authenticate with a generated keypair (no GitHub)
+## 2. Get a Caburé Bearer JWT — pick ONE option
 
-Write this to `agent-auth.mjs` and run `node agent-auth.mjs`. It generates a
-fresh Ed25519 keypair, signs the server's challenge, and prints a Caburé Bearer
-JWT (valid 7 days). Save the JWT.
+Both options end with a Bearer JWT in `$CABURE_TOKEN` that Step 3 uses. Set the
+base URL first:
+
+```bash
+export BASE_URL="https://ppv2-tsc-test.vercel.app"       # or your deployment's origin
+```
+
+### Option A — GitHub (RECOMMENDED: keeps your GitHub identity on the record)
+
+This is the normal path. It ties your contribution to a real GitHub account
+(useful for attestation / a non-anonymous participant list) and needs your human
+operator to authorize a code ONCE — ask them if you have one. It uses the GitHub
+OAuth device flow (RFC 8628); the ceremony server proxies it, so no client
+secret is involved.
+
+Write `github-auth.mjs`, run it, and relay the printed code to your human:
 
 ```js
-// agent-auth.mjs
+// github-auth.mjs — GitHub device flow, agent-driven
+const BASE = process.env.BASE_URL;
+if (!BASE) throw new Error("set BASE_URL");
+
+const init = await (await fetch(`${BASE}/api/ceremony/auth/cli`, { method: "POST" })).json();
+if (!init.userCode) throw new Error(`device flow init failed: ${init.error ?? JSON.stringify(init)}`);
+
+// Surface the code to the human on STDERR (stdout stays just the token).
+process.stderr.write(
+  `\n  ==> ACTION REQUIRED: open ${init.verificationUri} and enter code:  ${init.userCode}\n` +
+  `      (waiting up to ${Math.round(init.expiresIn / 60)} min for authorization...)\n\n`,
+);
+
+const deadline = Date.now() + init.expiresIn * 1000;
+let token;
+while (Date.now() < deadline) {
+  await new Promise((r) => setTimeout(r, (init.interval || 5) * 1000));
+  const data = await (await fetch(`${BASE}/api/ceremony/auth/cli?code=${init.loginCode}`)).json();
+  if (data.token) { token = data.token; break; }   // authorized
+  // otherwise { status: "pending" } — keep polling
+}
+if (!token) throw new Error("device flow timed out / not authorized");
+console.log(token);
+```
+
+```bash
+# Run it, show the human the code, and capture the token once they authorize.
+CABURE_TOKEN="$(node github-auth.mjs)"
+echo "got token: ${CABURE_TOKEN:0:24}..."
+```
+
+If you have NO human available to authorize the code, use Option B instead.
+
+Simplest variant: you can also just skip this script and run the CLI with NO
+`--token` (`npx @wonderland/cabure-cli contribute "$BASE_URL"`) — it drives the
+same device flow itself and prints the code for your human. Use the script above
+when you want the token up front (uniform `--token` flow, cleaner handoff).
+
+### Option B — Generated keypair (fully autonomous, no human, no GitHub)
+
+Use this when there is no human to authorize a GitHub code. The operator must
+have enabled it (`ALLOW_AGENT_AUTH=1`); otherwise the endpoint returns 404 and
+you must use Option A. Your contribution is recorded under an anonymous
+`agent:<fingerprint>` identity.
+
+```js
+// agent-auth.mjs — generated Ed25519 keypair, no GitHub
 import { generateKeyPairSync, sign } from "node:crypto";
 
-const BASE = process.env.BASE_URL;                       // e.g. https://ppv2-tsc-test.vercel.app
+const BASE = process.env.BASE_URL;
 if (!BASE) throw new Error("set BASE_URL");
 
 // 1) discover the exact challenge format (slug is domain-separation)
 const info = await (await fetch(`${BASE}/api/ceremony/auth/wallet`)).json();
-if (info.error) throw new Error(`agent auth unavailable: ${info.error}`);
+if (info.error) throw new Error(`agent auth unavailable (use Option A): ${info.error}`);
 
 // 2) generate a keypair, sign `cabure-agent-auth:<slug>:<unix-seconds>`
 const { publicKey, privateKey } = generateKeyPairSync("ed25519");
@@ -69,15 +133,9 @@ console.log(out.token);          // <-- the Bearer JWT; also out.participantId
 ```
 
 ```bash
-export BASE_URL="https://ppv2-tsc-test.vercel.app"       # or your deployment's origin
 CABURE_TOKEN="$(node agent-auth.mjs)"
 echo "got token: ${CABURE_TOKEN:0:24}..."
 ```
-
-If the discovery request returns `{"error": ...}` with HTTP 404, the operator
-has not enabled agent auth (they must set `ALLOW_AGENT_AUTH=1`). In that case,
-fall back to the human GitHub device flow (`npx @wonderland/cabure-cli
-contribute <url>` with no `--token`) or report that agent auth is disabled.
 
 --------------------------------------------------------------------------------
 ## 3. Contribute (headless, OS entropy, progressable)

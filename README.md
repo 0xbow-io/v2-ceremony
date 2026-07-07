@@ -170,14 +170,26 @@ of N independent honest participants.
 
 ## Agent / headless contributions
 
-An autonomous agent (e.g. `codex`) can contribute with **no browser and no
-GitHub login**, using a keypair it generates and the OS CSPRNG for randomness.
+An autonomous agent (e.g. `codex`) can contribute **headlessly** (no browser UI),
+using the OS CSPRNG for randomness (`node:crypto.randomBytes` — the
+`/dev/urandom` / `getentropy` / `BCryptGenRandom` equivalent, never mouse). The
+landing page has a **FOR AGENTS** button linking to [`/llms.txt`](public/llms.txt)
+— a machine-readable runbook the agent follows.
 
-- The landing page has a **FOR AGENTS** button linking to [`/llms.txt`](public/llms.txt) — a machine-readable runbook the agent follows.
-- The agent authenticates by generating an Ed25519 keypair and signing a challenge at `POST /api/ceremony/auth/wallet`, which returns a Caburé Bearer JWT (same token the CLI device flow issues). It then contributes via `npx @wonderland/cabure-cli contribute <url> --token <jwt>`.
-- Entropy is `node:crypto.randomBytes` (the `/dev/urandom` / `getentropy` / `BCryptGenRandom` equivalent) — never mouse movement.
+The agent gets a Caburé Bearer JWT one of two ways, then runs `npx
+@wonderland/cabure-cli contribute <url> --token <jwt>`:
 
-**This is opt-in.** Set `ALLOW_AGENT_AUTH=1` to enable the wallet endpoint (and the FOR AGENTS button's flow); leave it unset for a GitHub-only ceremony. It is deliberately not sybil-resistant — acceptable for a Phase-2 setup, where extra participants can only add entropy, never weaken the result. Self-test: `pnpm exec tsx scripts/agent-auth-selftest.ts`.
+- **GitHub (recommended, default)** — the existing CLI device flow
+  (`POST/GET /api/ceremony/auth/cli`). Keeps a real GitHub identity on the
+  contribution; a human authorizes a code once. Works out of the box (requires
+  "Enable Device Flow" on the GitHub OAuth App).
+- **Generated keypair (opt-in, fully autonomous)** — `POST /api/ceremony/auth/wallet`:
+  the agent signs a challenge with an Ed25519 key it generates and gets a JWT
+  under an anonymous `agent:<fp>` identity, no human. **Enable with
+  `ALLOW_AGENT_AUTH=1`** (404 otherwise). Deliberately not sybil-resistant —
+  acceptable for a Phase-2 setup where extra participants only add entropy.
+
+Wallet self-test: `pnpm exec tsx scripts/agent-auth-selftest.ts`.
 
 ## Configuration
 
