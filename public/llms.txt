@@ -19,7 +19,7 @@ before you) was honest. You cannot corrupt it by participating.
 --------------------------------------------------------------------------------
 ## 0. Facts you need
 
-- BASE_URL = the origin serving this file. Example: https://ppv2-tsc-test.vercel.app
+- BASE_URL = the origin serving this file. Example: https://ceremony.privacypools.com
 - Requirements: Node.js >= 20 and `npx` (installs the CLI on demand). ~4 GB free
   RAM and a few GB of disk for the zkey files. Network access to BASE_URL and npm.
 - Time budget: the contribution COMPUTE runs locally and is slow — it can take up
@@ -44,7 +44,7 @@ Both options end with a Bearer JWT in `$CABURE_TOKEN` that Step 3 uses. Set the
 base URL first:
 
 ```bash
-export BASE_URL="https://ppv2-tsc-test.vercel.app"       # or your deployment's origin
+export BASE_URL="https://ceremony.privacypools.com"       # or your deployment's origin
 ```
 
 ### Option A — GitHub (RECOMMENDED: keeps your GitHub identity on the record)
