@@ -101,13 +101,19 @@ async function apiFetch<T>(
   const contentType = response.headers.get("content-type") ?? "";
 
   if (!response.ok) {
-    const body = contentType.includes("application/json")
-      ? ((await response.json()) as { error?: string })
-      : { error: await response.text() };
-    const message =
-      body.error || `Request failed with status ${response.status}.`;
+    // Only a JSON body carries a real error message from our API routes. A
+    // non-JSON body is a platform/proxy error page (e.g. Next's HTML 500) —
+    // useless to the user and hideous when rendered, so never surface it; fall
+    // back to the status code instead.
+    let message: string | undefined;
+    if (contentType.includes("application/json")) {
+      const body = (await response.json().catch(() => null)) as {
+        error?: string;
+      } | null;
+      message = body?.error;
+    }
     throw new ApiError(
-      message,
+      message || `Request failed with status ${response.status}.`,
       response.status,
       parseRetryAfter(response.headers.get("Retry-After")),
     );
