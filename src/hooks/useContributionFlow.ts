@@ -5,6 +5,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import {
   ApiError,
+  getParticipantEligibility,
   getQueuePosition,
   getZkeyInfo,
   joinQueue,
@@ -37,6 +38,15 @@ const SLOT_WAIT_MAX_SECONDS = 30;
 // Cap on consecutive slot waits before we stop waiting and surface the error,
 // so a slot that never clears (rather than just lingering) can't loop forever.
 const MAX_SLOT_WAITS = 10;
+
+// Keep the current circuit's queue slot alive while we hold it. A slot only stays
+// fresh via a POST /queue (which bumps joinedAt) — the position poll is a
+// read-only GET and is paused during compute. Without a heartbeat, a wait or a
+// compute longer than the server's queueTimeoutSeconds (300s default) ages the
+// slot out: the participant silently loses their turn, and their already-computed
+// contribution is then rejected for building on a stale head. 90s leaves ~3 beats
+// of margin under the 300s default and must stay comfortably below it.
+const QUEUE_HEARTBEAT_MS = 90_000;
 
 // Server receipt plus the contributor's OWN h_k, computed client-side
 // (`result.contributionHash` from contribute(), not the server's
@@ -172,8 +182,12 @@ export function useContributionFlow(options: {
     measuredWeightRef.current = 0;
   }, []);
 
-  const activeCircuitIds =
-    resolvedCircuitIds.length > 0 ? resolvedCircuitIds : selectedCircuitIds;
+  // The active list is ONLY the server-eligibility-resolved list (set by
+  // joinAndStart). It must not fall back to selectedCircuitIds: if resolution
+  // yields nothing (already contributed to everything), currentCircuitId stays
+  // null so the queue poll / heartbeat / rejoin machinery never runs for a
+  // circuit the participant can't contribute to.
+  const activeCircuitIds = resolvedCircuitIds;
   const currentCircuitId = activeCircuitIds[currentCircuitIndex] ?? null;
   const currentCircuit = circuits.find(
     (circuit) => circuit.id === currentCircuitId,
@@ -331,30 +345,30 @@ export function useContributionFlow(options: {
 
   // --- Rejoin mutation ---
 
+  // Rejoin ONLY the current circuit (join-current-only): we hold exactly one
+  // queue slot at a time, so a "not in queue" recovery must not re-add us to
+  // every remaining circuit (that reintroduced the hold-all-slots problem).
   const rejoinMutation = useMutation({
     mutationFn: async () => {
-      const remaining = activeCircuitIds.slice(currentCircuitIndex);
-      return await joinQueue({
-        circuitIds: remaining,
-      });
+      if (!currentCircuitId) return { positions: [] };
+      return await joinQueue({ circuitIds: [currentCircuitId] });
     },
     onSuccess: (result) => {
-      const remaining = activeCircuitIds.slice(currentCircuitIndex);
+      if (!currentCircuitId) return;
+      const position = result.positions.find(
+        (item) => item.circuitId === currentCircuitId,
+      );
       setCircuitRuns((prev) =>
-        prev.map((circuit) => {
-          if (!remaining.includes(circuit.id) || circuit.status === "done") {
-            return circuit;
-          }
-          const position = result.positions.find(
-            (item) => item.circuitId === circuit.id,
-          );
-          return {
-            ...circuit,
-            status: "waiting" as const,
-            position: position?.position,
-            etaSeconds: position?.estimatedWaitSeconds,
-          };
-        }),
+        prev.map((circuit) =>
+          circuit.id === currentCircuitId && circuit.status !== "done"
+            ? {
+                ...circuit,
+                status: "waiting" as const,
+                position: position?.position,
+                etaSeconds: position?.estimatedWaitSeconds,
+              }
+            : circuit,
+        ),
       );
       setQueueError(null);
     },
@@ -366,11 +380,19 @@ export function useContributionFlow(options: {
 
   // --- Queue position query (auto-polling) ---
 
+  // Once a contribution/queue error is surfaced with the manual Retry/Cancel
+  // buttons, the flow is paused waiting on the user. Stop polling AND stop the
+  // heartbeat while blocked — otherwise the heartbeat would keep the front-of-
+  // queue slot fresh forever, holding the line hostage instead of letting the
+  // 300s queue timeout release it. `retry()` clears these errors and resumes.
+  const blockedOnManualError = Boolean(contributionError || queueError);
+
   const queueEnabled =
     flowActive &&
     !!currentCircuitId &&
     !contributeMutation.isPending &&
-    !finalizeReady;
+    !finalizeReady &&
+    !blockedOnManualError;
   const queuePositionQueryKey = [
     "queuePosition",
     flowRunId,
@@ -513,6 +535,36 @@ export function useContributionFlow(options: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [queueQuery.error, finalizeReady]);
 
+  // Join the current circuit's queue when it becomes current, and keep its slot
+  // alive on an interval until we advance. This does double duty:
+  //   1. join-current-only — we only ever hold ONE queue slot; the next circuit
+  //      is joined here as it becomes current (not all up front), so a slow
+  //      compute on one circuit can't age out our slots in the others.
+  //   2. keep-alive heartbeat — re-POSTing bumps joinedAt, so a wait or a
+  //      compute longer than queueTimeoutSeconds never silently drops our turn
+  //      (which would otherwise force a stale-head recompute).
+  // The POST also runs during compute (the position poll is paused then), which
+  // is exactly when the slot would otherwise expire. Best-effort: a failed beat
+  // is recovered by the poll's "not in queue" → rejoin path.
+  useEffect(() => {
+    if (!flowActive || !currentCircuitId || finalizeReady || blockedOnManualError)
+      return;
+    let cancelled = false;
+    const beat = () => {
+      joinQueue({ circuitIds: [currentCircuitId] }).catch(() => {
+        /* best-effort; poll/rejoin recovers a dropped slot */
+      });
+    };
+    beat();
+    const timer = setInterval(() => {
+      if (!cancelled) beat();
+    }, QUEUE_HEARTBEAT_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [flowActive, currentCircuitId, finalizeReady, blockedOnManualError]);
+
   // --- Actions (same public API) ---
 
   const joinAndStart = async (
@@ -534,26 +586,82 @@ export function useContributionFlow(options: {
     queryClient.removeQueries({ queryKey: ["queuePosition"] });
     setFlowRunId((value) => value + 1);
 
-    const result = await joinQueue(joinOptions);
+    // Resolve the ordered list of circuits to contribute to WITHOUT joining every
+    // queue up front. Joining all at once made a participant hold a front-of-queue
+    // slot in circuits they weren't working yet; those slots aged out while they
+    // computed the first circuit, so the upfront positions went stale and
+    // participants appeared to jump each other ("bad order"). We join only the
+    // current circuit (here, and each next one via the heartbeat effect).
+    let resolved: string[];
+    try {
+      const eligibility = await getParticipantEligibility();
+      const eligibleSet = new Set(eligibility.eligibleCircuitIds);
+      const selectedIds = joinOptions.circuitIds ?? selectedCircuitIds;
+      resolved = selectedIds.filter((id) => eligibleSet.has(id));
+      // Mirror the server's queue fallback: if everything in the selection is
+      // already done but other circuits remain eligible, contribute to those.
+      // (Tier resolution here is a simplified intersection and does NOT replicate
+      // the server's per-tier backfill — acceptable while tiersEnabled is false;
+      // the server continuity gate preserves chain integrity regardless.)
+      if (resolved.length === 0) {
+        resolved = eligibility.eligibleCircuitIds;
+      }
+    } catch {
+      // Eligibility unavailable — fall back to the raw selection; the server
+      // still enforces eligibility on submit, so this only affects ordering.
+      resolved = joinOptions.circuitIds ?? selectedCircuitIds;
+    }
 
-    const ids = result.positions.map((p) => p.circuitId);
-    setResolvedCircuitIds(ids);
+    if (resolved.length === 0) {
+      setQueueError("You have already contributed to every available circuit.");
+      return;
+    }
 
-    const runs: CircuitRunItem[] = ids.map((circuitId) => {
-      const circuit = allCircuits.find((item) => item.id === circuitId);
-      const position = result.positions.find(
-        (item) => item.circuitId === circuitId,
-      );
-      return {
-        id: circuitId,
-        label: circuit?.label ?? circuitId,
-        status: "waiting",
-        position: position?.position,
-        etaSeconds: position?.estimatedWaitSeconds,
-      };
-    });
+    // Render all resolved circuits as "waiting"; only the current one carries a
+    // live queue position. The others are joined as they become current, so they
+    // have no position yet.
+    const makeRuns = (ids: string[]): CircuitRunItem[] =>
+      ids.map((circuitId) => {
+        const circuit = allCircuits.find((item) => item.id === circuitId);
+        return {
+          id: circuitId,
+          label: circuit?.label ?? circuitId,
+          status: "waiting" as const,
+        };
+      });
 
-    setCircuitRuns(runs);
+    // Join only the first circuit for an immediate position. The heartbeat effect
+    // also (re)joins it, so a failure here is non-fatal — the poll recovers it.
+    try {
+      const result = await joinQueue({ circuitIds: [resolved[0]] });
+      // The server is authoritative about which circuit it actually queued us on:
+      // if resolved[0] went ineligible between our eligibility read and this join,
+      // it falls back to a different eligible circuit. Follow it — make that the
+      // current circuit — so the poll/heartbeat don't target a circuit we're not
+      // actually queued on.
+      const got = result.positions[0];
+      if (got && got.circuitId !== resolved[0]) {
+        resolved = [got.circuitId, ...resolved.filter((id) => id !== got.circuitId)];
+      }
+      setResolvedCircuitIds(resolved);
+      const runs = makeRuns(resolved);
+      if (got) {
+        const idx = runs.findIndex((r) => r.id === got.circuitId);
+        if (idx >= 0) {
+          runs[idx] = {
+            ...runs[idx],
+            position: got.position,
+            etaSeconds: got.estimatedWaitSeconds,
+          };
+        }
+      }
+      setCircuitRuns(runs);
+    } catch {
+      // Non-fatal: commit the resolved list so the flow can start; the heartbeat
+      // effect + poll will join the current circuit and surface its position.
+      setResolvedCircuitIds(resolved);
+      setCircuitRuns(makeRuns(resolved));
+    }
   };
 
   // Manual retry from the error box. Resets the attempt counter so the
