@@ -79,26 +79,65 @@ npx --yes -p node@20 -p @wonderland/cabure-cli@1.0.0 \
   --token "$CABURE_TOKEN" 2>&1 | tee cabure-progress.log
 ```
 
-> **IMPORTANT — on the v1 fallback, do the large circuits ONE AT A TIME.**
-> v1 does not refresh its queue slot during a long compute, so a plain
-> (no-`--circuit`) run queues *every* remaining circuit at once and the big
-> `transact_5x*` ones deadlock — you'll see `Not at front of the queue` on
-> submit, or the run stalls for many minutes with your id stuck as the circuit's
-> `currentParticipant`. **Do not wait it out** (it won't self-clear) and do not
-> conclude the ceremony is broken. Instead contribute each large circuit on its
-> own — a clean queue slot per circuit submits reliably:
+> **IMPORTANT — on the v1 fallback: keep your queue slot alive, and go ONE CIRCUIT AT A TIME.**
+> v1 never refreshes its queue slot — not while waiting in line, not during a long
+> compute — but the server drops any slot that isn't re-POSTed within 5 minutes.
+> Two symptoms follow, and NEITHER means the ceremony is broken:
+> - On a **busy queue** you get `Not in queue` before you ever reach the front —
+>   your slot expired while you waited behind others (deposit alone can be 20+ deep).
+> - On a **long compute** (`transact_5x*`) you get `Not at front of the queue` on
+>   submit, or the run stalls for minutes with your id stuck as the circuit's
+>   `currentParticipant`.
+>
+> **Do not wait it out — it won't self-clear.** Fix it by running a tiny background
+> heartbeat that re-POSTs your slot every 90s for the ONE circuit you're on, and
+> contributing circuits one at a time. Save this as `queue-heartbeat.mjs`:
+>
+> ```js
+> // queue-heartbeat.mjs <circuitId> — keeps your v1 queue slot alive while you wait + compute.
+> const BASE = process.env.BASE_URL || "https://ceremony.privacypools.com";
+> const token = process.env.CABURE_TOKEN;
+> const circuit = process.argv[2];
+> if (!token || !circuit) throw new Error("usage: CABURE_TOKEN=... node queue-heartbeat.mjs <circuitId>");
+> const beat = async () => {
+>   try {
+>     const res = await fetch(`${BASE}/api/ceremony/queue`, {
+>       method: "POST",
+>       headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+>       body: JSON.stringify({ circuitIds: [circuit] }),
+>     });
+>     const out = await res.json().catch(() => ({}));
+>     process.stderr.write(`[heartbeat] ${circuit} pos=${out.positions?.[0]?.position ?? out.error ?? "?"}\n`);
+>   } catch (e) { process.stderr.write(`[heartbeat] ${circuit} ${e}\n`); }
+> };
+> beat();
+> setInterval(beat, 90_000);
+> ```
+>
+> Then loop the circuits, running the heartbeat alongside each single-circuit run
+> and STOPPING it the moment that circuit finishes (a heartbeat left running after
+> you've completed a circuit would re-queue you on another one):
 >
 > ```bash
-> for c in transact_5x1 transact_5x2 transact_5x3 transact_5x4 transact_5x5; do
+> # ordered circuit ids straight from the ceremony
+> CIRCUITS=$(curl -s https://ceremony.privacypools.com/api/ceremony/status \
+>   | grep -o '"circuitId":"[^"]*"' | cut -d'"' -f4)
+>
+> for c in $CIRCUITS; do
+>   node queue-heartbeat.mjs "$c" & HB=$!
 >   npx --yes -p node@20 -p @wonderland/cabure-cli@1.0.0 \
 >     cabure contribute https://ceremony.privacypools.com \
 >     --token "$CABURE_TOKEN" --circuit "$c" 2>&1 | tee -a cabure-progress.log
+>   kill "$HB" 2>/dev/null
 > done
 > ```
 >
 > Re-running is safe — the server skips circuits you've already completed, so a
-> single-circuit retry only redoes the one that's pending. (This is a v1-only
-> quirk; the browser flow and a fixed v2 CLI refresh the queue during compute.)
+> retry only redoes the pending one. The front slot also has a per-circuit hold
+> cap (~4 min for deposit up to ~15 min for the 5x* circuits); with the heartbeat
+> running and the CLI actively computing/uploading you finish well inside it. (This
+> whole dance is v1-only — the browser flow and a fixed v2 CLI refresh the slot
+> automatically.)
 
 It prints a line per phase — `Queue`, `Download`, `Entropy`, `Contributing`,
 `Upload`, `Submit`. Report each circuit as it finishes; never abort a
