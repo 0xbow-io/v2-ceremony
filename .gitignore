@@ -12,6 +12,6 @@ public/finalize/*.zkey
 .env*.local
 .idea/
 
-circuits/
+/circuits/
 public/
 backups/
