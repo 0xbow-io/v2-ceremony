@@ -381,10 +381,10 @@ export function pruneExpiredEntries(
 // is never pruned, so without this a slow or stuck front-runner blocks everyone.
 // Bounds below; the middle scales with circuit size (download + compute + the
 // server-side verify all grow with the constraint count).
-const ACTIVE_SLOT_FLOOR_SECONDS = 480; // 8 min — generous even for the smallest circuit
+const ACTIVE_SLOT_FLOOR_SECONDS = 180; // 3 min — deposit finishes well under this
 const ACTIVE_SLOT_CEIL_SECONDS = 1200; // 20 min hard ceiling
-const ACTIVE_SLOT_BASE_SECONDS = 420; // fixed overhead budget (download + verify)
-const ACTIVE_SLOT_CONSTRAINTS_PER_SECOND = 300; // added budget per second of compute headroom
+const ACTIVE_SLOT_BASE_SECONDS = 180; // fixed overhead budget (download + verify)
+const ACTIVE_SLOT_CONSTRAINTS_PER_SECOND = 200; // added budget per second of compute headroom
 
 // Parse a constraint count that may be formatted with thousands separators
 // ("142,741" -> 142741). Returns NaN when unparseable so callers can fall back
