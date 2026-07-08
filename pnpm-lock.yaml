@@ -21,8 +21,8 @@ importers:
         specifier: 2.3.3
         version: 2.3.3
       '@wonderland/cabure-crypto':
-        specifier: 2.0.0-beta.0
-        version: 2.0.0-beta.0
+        specifier: 2.0.0
+        version: 2.0.0
       next:
         specifier: 15.5.12
         version: 15.5.12(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
@@ -638,8 +638,8 @@ packages:
   '@vitest/utils@4.1.2':
     resolution: {integrity: sha512-xw2/TiX82lQHA06cgbqRKFb5lCAy3axQ4H4SoUFhUsg+wztiet+co86IAMDtF6Vm1hc7J6j09oh/rgDn+JdKIQ==}
 
-  '@wonderland/cabure-crypto@2.0.0-beta.0':
-    resolution: {integrity: sha512-r2Wg81vsUpgaoVyJklq8XhEhnKyhQ06Jx+ruhNQtcyW+t2QeayKe8G0iPDze/QchmkOIqP9mWIlzO0YjQdBh4A==}
+  '@wonderland/cabure-crypto@2.0.0':
+    resolution: {integrity: sha512-/MiW38sZMfdSTH6nabm3kLrgMskUo+Wunhl31x6bF2f23iGNOq2fnyBULD7tu8B+V3pVpe+xicwF025GVKQWvA==}
 
   assertion-error@2.0.1:
     resolution: {integrity: sha512-Izi8RQcffqCeNVgFigKli1ssklIbpHnCYc6AknXGYoB6grJqyeby7jv12JUQgmTAnIDnbck1uxksT4dzN3PWBA==}
@@ -1592,7 +1592,7 @@ snapshots:
       convert-source-map: 2.0.0
       tinyrainbow: 3.1.0
 
-  '@wonderland/cabure-crypto@2.0.0-beta.0':
+  '@wonderland/cabure-crypto@2.0.0':
     dependencies:
       ffjavascript: 0.3.1
       snarkjs: 0.7.5
