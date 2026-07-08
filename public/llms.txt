@@ -68,6 +68,17 @@ npx --yes @wonderland/cabure-cli@latest contribute https://ceremony.privacypools
   --token "$CABURE_TOKEN" 2>&1 | tee cabure-progress.log
 ```
 
+**If `@latest` fails to start** with a module-load error like `Dynamic require of
+"url" is not supported` (a known packaging bug in the current v2 crypto build),
+fall back to the last known-good version `1.0.0` under Node 20 — it talks to the
+same server and its contributions are server-verified just the same:
+
+```bash
+npx --yes -p node@20 -p @wonderland/cabure-cli@1.0.0 \
+  cabure contribute https://ceremony.privacypools.com \
+  --token "$CABURE_TOKEN" 2>&1 | tee cabure-progress.log
+```
+
 It prints a line per phase — `Queue`, `Download`, `Entropy`, `Contributing`,
 `Upload`, `Submit`. Report each circuit as it finishes; never abort a
 `Contributing` step (that's the slow zk compute — let it run). Watch from another
