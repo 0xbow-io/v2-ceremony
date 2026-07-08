@@ -9,6 +9,7 @@ import {
 
 import "@/lib/snarkjs-gc-guard";
 import { getCeremonyConfig, type CeremonyConfig } from "@/lib/ceremony-config";
+import { verifyRemote } from "@/lib/external-verifier";
 import { loadPtau } from "@/lib/ptau-loader";
 import { getParticipant } from "@/lib/participant-auth";
 import {
@@ -400,6 +401,11 @@ export async function POST(
   }
 
   try {
+    // sha256 of the exact bytes we will commit (putBinary(zkeyPath, body)
+    // below). Doubles as the pin sent to the external verifier so it verifies
+    // precisely these bytes and nothing else.
+    const computedHash = `0x${createHash("sha256").update(body).digest("hex")}`;
+
     // verifyChain re-walks the chain and rejects a poisoned contribution at
     // submit time (deferring to finalize would be a late, unrecoverable DoS).
     // It is per-contribution validity, not continuity — the gate handles that —
@@ -407,46 +413,46 @@ export async function POST(
     // pinned genesis, so concurrency cannot change the result. Mandatory on every
     // deployment; the flag can only ADD it in dev/CI, never remove it. Expensive
     // but DoS-bounded: the pre-filter lets only a head-extending zkey reach it,
-    // the slot caps it to one verify per participant, and a definitive failure
-    // consumes the turn.
+    // and the slot caps it to one verify per participant. When CEREMONY_VERIFIER_URL
+    // is set the verify runs on an external worker instead of in-process (identical
+    // 400/503 semantics); unset it to fall straight back to in-process verify.
+
     const mustVerify =
       process.env.NODE_ENV === "production" || config.verifyContributions;
     if (mustVerify) {
-      try {
-        const ptau = await loadPtau({
-          url: precheck.circuit.ptauUrl,
-          localPath: circuitConfig.artifacts.ptauPath,
-        });
-
-        // Verify against the pinned genesis: download it and confirm it still
-        // matches the hash from init, so the chain roots in the real genesis, not
-        // a swapped blob.
-        const genesisResponse = await fetch(precheck.circuit.initialZkeyUrl, {
-          signal: AbortSignal.timeout(60_000),
-        });
-        if (!genesisResponse.ok) {
+      const externalVerifierUrl = process.env.CEREMONY_VERIFIER_URL?.trim();
+      if (externalVerifierUrl) {
+        // Offloaded verify: same 400/503 semantics as the in-process path below.
+        // A definitive invalid chain (worker 200 {valid:false}) is a
+        // non-consuming 400; ANY failure to obtain a verdict (worker down,
+        // timeout, hash-pin mismatch, non-200) throws and becomes a
+        // non-consuming 503 — an infra fault must never be charged as an invalid
+        // contribution. zkeySha256 pins the worker to the exact `body` bytes we
+        // commit, so it can never verify bytes other than these (closes the TOCTOU
+        // where blobUrl could be swapped between our fetch and the worker's).
+        let isValid: boolean;
+        try {
+          isValid = await verifyRemote({
+            url: externalVerifierUrl,
+            token: process.env.CEREMONY_VERIFIER_TOKEN,
+            ptauUrl: precheck.circuit.ptauUrl,
+            genesisUrl: precheck.circuit.initialZkeyUrl,
+            genesisSha256: precheck.circuit.initialZkeyHash,
+            zkeyUrl: blobUrl,
+            zkeySha256: computedHash,
+          });
+        } catch (error) {
+          console.error(
+            `Remote verification failed to run for circuit ${id}:`,
+            error,
+          );
           await deleteBinary(blobUrl).catch(() => {});
           return NextResponse.json(
-            { error: "Could not load the pinned genesis to verify against" },
-            { status: 502 },
+            { error: "Verification temporarily unavailable. Please retry." },
+            { status: 503 },
           );
         }
-        const genesis = new Uint8Array(await genesisResponse.arrayBuffer());
-        const genesisHash = `0x${createHash("sha256").update(genesis).digest("hex")}`;
-        if (genesisHash !== precheck.circuit.initialZkeyHash) {
-          await deleteBinary(blobUrl).catch(() => {});
-          return NextResponse.json(
-            { error: "Pinned genesis does not match its recorded hash" },
-            { status: 500 },
-          );
-        }
-
-        const isValid = await verifyChain(ptau, genesis, body);
         if (!isValid) {
-          // Don't consume the turn: verifyChain returns false on ANY failure, so
-          // an infra fault (e.g. /tmp full, OOM under load) is indistinguishable
-          // from an invalid chain — consuming would punish an honest contributor.
-          // They keep their turn and retry; poison just retries until it ages out.
           await deleteBinary(blobUrl).catch(() => {});
           return NextResponse.json(
             {
@@ -456,20 +462,64 @@ export async function POST(
             { status: 400 },
           );
         }
-      } catch (error) {
-        // The verifier couldn't run (download / hashing / snarkjs crash) — 503 to
-        // retry. Like the false branch, this never consumes the turn: an infra
-        // fault must not be charged as an invalid contribution.
-        console.error(`Verification failed to run for circuit ${id}:`, error);
-        await deleteBinary(blobUrl).catch(() => {});
-        return NextResponse.json(
-          { error: "Verification temporarily unavailable. Please retry." },
-          { status: 503 },
-        );
+      } else {
+        try {
+          const ptau = await loadPtau({
+            url: precheck.circuit.ptauUrl,
+            localPath: circuitConfig.artifacts.ptauPath,
+          });
+
+          // Verify against the pinned genesis: download it and confirm it still
+          // matches the hash from init, so the chain roots in the real genesis, not
+          // a swapped blob.
+          const genesisResponse = await fetch(precheck.circuit.initialZkeyUrl, {
+            signal: AbortSignal.timeout(60_000),
+          });
+          if (!genesisResponse.ok) {
+            await deleteBinary(blobUrl).catch(() => {});
+            return NextResponse.json(
+              { error: "Could not load the pinned genesis to verify against" },
+              { status: 502 },
+            );
+          }
+          const genesis = new Uint8Array(await genesisResponse.arrayBuffer());
+          const genesisHash = `0x${createHash("sha256").update(genesis).digest("hex")}`;
+          if (genesisHash !== precheck.circuit.initialZkeyHash) {
+            await deleteBinary(blobUrl).catch(() => {});
+            return NextResponse.json(
+              { error: "Pinned genesis does not match its recorded hash" },
+              { status: 500 },
+            );
+          }
+
+          const isValid = await verifyChain(ptau, genesis, body);
+          if (!isValid) {
+            // Don't consume the turn: verifyChain returns false on ANY failure, so
+            // an infra fault (e.g. /tmp full, OOM under load) is indistinguishable
+            // from an invalid chain — consuming would punish an honest contributor.
+            // They keep their turn and retry; poison just retries until it ages out.
+            await deleteBinary(blobUrl).catch(() => {});
+            return NextResponse.json(
+              {
+                error:
+                  "Verification failed. If your contribution is valid, please retry.",
+              },
+              { status: 400 },
+            );
+          }
+        } catch (error) {
+          // The verifier couldn't run (download / hashing / snarkjs crash) — 503 to
+          // retry. Like the false branch, this never consumes the turn: an infra
+          // fault must not be charged as an invalid contribution.
+          console.error(`Verification failed to run for circuit ${id}:`, error);
+          await deleteBinary(blobUrl).catch(() => {});
+          return NextResponse.json(
+            { error: "Verification temporarily unavailable. Please retry." },
+            { status: 503 },
+          );
+        }
       }
     }
-
-    const computedHash = `0x${createHash("sha256").update(body).digest("hex")}`;
 
     // Unique path per attempt, never a shared or per-participant fixed path. Once
     // a contribution commits, `currentZkeyUrl` points at this blob. Two concurrent

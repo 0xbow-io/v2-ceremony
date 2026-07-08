@@ -1,0 +1,16 @@
+{
+  "name": "ceremony-verifier",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "dependencies": {
+    "@wonderland/cabure-crypto": "2.0.0",
+    "snarkjs": "0.7.5"
+  }
+}
