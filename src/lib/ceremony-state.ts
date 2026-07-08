@@ -40,7 +40,16 @@ export interface ContributionReceipt {
 
 export interface QueueEntry {
   participantId: string;
+  // Liveness clock. Refreshed on every POST /queue (the client heartbeat), so it
+  // only proves the tab is still open — pruneExpiredEntries drops an entry when
+  // this ages past queueTimeoutSeconds. NOT a progress signal: a stuck-but-open
+  // tab keeps this fresh forever.
   joinedAt: number;
+  // Hard progress clock for the ACTIVE slot (queue[0]). Stamped once when a
+  // participant reaches the front and never bumped by the heartbeat, so it
+  // bounds how long anyone may hold the front regardless of liveness. Only the
+  // front entry carries it. See advanceActiveSlot.
+  activeSince?: number;
 }
 
 export interface CircuitState {
@@ -364,6 +373,86 @@ export function pruneExpiredEntries(
 ): QueueEntry[] {
   const timeoutMs = timeoutSeconds * 1000;
   return queue.filter((entry) => now - entry.joinedAt < timeoutMs);
+}
+
+// How long a participant may hold the front-of-queue (active) slot before being
+// rotated to the back. This is the hard cap the queue timeout can no longer
+// provide on its own: the client heartbeat keeps joinedAt fresh, so an open tab
+// is never pruned, so without this a slow or stuck front-runner blocks everyone.
+// Bounds below; the middle scales with circuit size (download + compute + the
+// server-side verify all grow with the constraint count).
+const ACTIVE_SLOT_FLOOR_SECONDS = 480; // 8 min — generous even for the smallest circuit
+const ACTIVE_SLOT_CEIL_SECONDS = 1200; // 20 min hard ceiling
+const ACTIVE_SLOT_BASE_SECONDS = 420; // fixed overhead budget (download + verify)
+const ACTIVE_SLOT_CONSTRAINTS_PER_SECOND = 300; // added budget per second of compute headroom
+
+// Parse a constraint count that may be formatted with thousands separators
+// ("142,741" -> 142741). Returns NaN when unparseable so callers can fall back
+// to the most generous cap rather than risk kicking honest contributors.
+export function parseConstraintCount(constraints: string): number {
+  const digits = constraints.replace(/[^0-9]/g, "");
+  return digits.length > 0 ? Number(digits) : Number.NaN;
+}
+
+// Per-circuit active-slot cap derived from the circuit's constraint count. Falls
+// back to the ceiling (most lenient) if the count can't be parsed — never kick
+// on bad config data.
+export function deriveMaxActiveSeconds(constraints: string): number {
+  const count = parseConstraintCount(constraints);
+  if (Number.isNaN(count)) return ACTIVE_SLOT_CEIL_SECONDS;
+  const seconds =
+    ACTIVE_SLOT_BASE_SECONDS + count / ACTIVE_SLOT_CONSTRAINTS_PER_SECOND;
+  const rounded = Math.round(seconds / 30) * 30;
+  return Math.min(
+    ACTIVE_SLOT_CEIL_SECONDS,
+    Math.max(ACTIVE_SLOT_FLOOR_SECONDS, rounded),
+  );
+}
+
+// The effective cap for a circuit: an explicit config override wins, else the
+// size-derived default.
+export function resolveMaxActiveSeconds(
+  circuitConfig: CeremonyCircuitConfig,
+): number {
+  return (
+    circuitConfig.maxActiveSeconds ??
+    deriveMaxActiveSeconds(circuitConfig.constraints)
+  );
+}
+
+// Enforce the active-slot cap and keep the front's progress clock consistent.
+// Call AFTER pruneExpiredEntries, on any read of a circuit's queue:
+//   - only the front (queue[0]) is the active contributor, so any stray
+//     activeSince behind it is cleared;
+//   - if the front has held the slot longer than maxActiveSeconds it is rotated
+//     to the BACK of this circuit's queue (its liveness clock reset, its
+//     progress clock cleared) so the next participant takes over;
+//   - whoever is at the front afterwards gets activeSince stamped so their hard
+//     clock starts.
+// Pure and idempotent: returns a new array of shallow-copied entries and leaves
+// the input untouched, so it is safe to call on both persisted (POST/contribute)
+// and read-only (GET/upload) paths.
+export function advanceActiveSlot(
+  queue: QueueEntry[],
+  maxActiveSeconds: number,
+  now: number = Date.now(),
+): QueueEntry[] {
+  const next = queue.map((entry) => ({ ...entry }));
+  for (let i = 1; i < next.length; i++) {
+    next[i].activeSince = undefined;
+  }
+  const maxMs = maxActiveSeconds * 1000;
+  const front = next[0];
+  if (front && front.activeSince != null && now - front.activeSince > maxMs) {
+    const kicked = next.shift()!;
+    kicked.activeSince = undefined;
+    kicked.joinedAt = now;
+    next.push(kicked);
+  }
+  if (next[0] && next[0].activeSince == null) {
+    next[0].activeSince = now;
+  }
+  return next;
 }
 
 export function kvKey(prefix: string, suffix: string): string {

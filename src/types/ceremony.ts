@@ -20,6 +20,10 @@ export interface CeremonyCircuitConfig {
   description: string;
   constraints: string;
   targetContributions: number;
+  // Optional override for how long a participant may hold this circuit's
+  // front-of-queue slot before being rotated to the back (seconds). When unset
+  // the cap is derived from `constraints` (see resolveMaxActiveSeconds).
+  maxActiveSeconds?: number;
   artifacts: CircuitArtifactsConfig;
 }
 

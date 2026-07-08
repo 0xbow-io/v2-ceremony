@@ -339,6 +339,20 @@ export function useContributionFlow(options: {
         waitThenRetry(message, error.retryAfterSeconds);
         return;
       }
+      // Transient SERVER error (HTTP >=5xx) on the submit request: back off and
+      // retry (bounded by MAX_SLOT_WAITS) rather than burning the instant-retry
+      // budget and freezing on the manual Retry button. During the Upstash
+      // outage the contribute route returned 500s and the 3-strike freeze
+      // tripped the whole fleet at once with no recovery; this self-heals when
+      // the backend comes back. Deliberately narrow to ApiError 5xx: the mutation
+      // also throws plain Errors for TERMINAL failures (zkey/receipt hash
+      // mismatch, worker failure, blob upload-token 4xx) and those — plus every
+      // 4xx (bad proof, already contributed, not at front) — must still surface
+      // via autoRetryOrSurface, not loop on recompute.
+      if (error instanceof ApiError && error.status >= 500) {
+        waitThenRetry(message, null);
+        return;
+      }
       autoRetryOrSurface(message, "contribution");
     },
   });
@@ -530,7 +544,23 @@ export function useContributionFlow(options: {
     ) {
       rejoinMutation.mutate();
     } else if (queueQuery.error && !msg.toLowerCase().includes("not in queue")) {
-      autoRetryOrSurface(msg, "queue");
+      // Transient backend blip (network error or 5xx): do NOT surface a manual
+      // error or spend the retry budget. The position poll (every 3s) and the
+      // heartbeat keep running and self-heal the moment the backend recovers.
+      // Surfacing here is what froze every client at once during the Upstash
+      // outage — a shared blip tripped all of them into the manual-Retry state
+      // simultaneously, so nothing self-recovered. Staying in the poll is safe
+      // because the server-side active-slot cap bounds how long we can hold the
+      // front even while we keep heartbeating. Only genuinely terminal (4xx)
+      // errors go through the surface path.
+      const status =
+        queueQuery.error instanceof ApiError
+          ? queueQuery.error.status
+          : undefined;
+      const transient = status === undefined || status >= 500;
+      if (!transient) {
+        autoRetryOrSurface(msg, "queue");
+      }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [queueQuery.error, finalizeReady]);
