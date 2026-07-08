@@ -100,12 +100,15 @@ the shared-secret header only (useful for a public-URL fallback or local testing
 
 ## Prerequisites before enabling in production
 
-1. **Fix the `deposit` ptau 404.** Its circuit `ptauUrl` in KV currently 404s;
-   the worker fetches the same URL and would 503 too. Repair the KV state / re-run
-   init before relying on the offload for that circuit (others are unaffected if
-   their URLs resolve).
+1. **Confirm every circuit's ptau/genesis URLs resolve.** A Blob-store rotation on
+   2026-07-08 temporarily left `ptauUrl`/`initialZkeyUrl` in KV pointing at a
+   deleted store (verify 503s). It **appears already resolved** — the ceremony is
+   actively verifying and committing contributions again — but this was diagnosed
+   from live behavior, not a KV read. Run `scripts/verify-blob-urls.ts` (read-only,
+   needs Upstash creds) to confirm all 27 circuits report `OK` before relying on the
+   offload. The worker reads the same KV URLs, so if any are stale it 503s too.
 2. **Confirm OIDC is enabled** for the Vercel project (a `VERCEL_OIDC_TOKEN` pulls
-   successfully, which indicates it is).
+   successfully, which indicates it is — verified 2026-07-08).
 3. **Deploy the route change** (this PR).
 
 ## Infrastructure (provisioned in the v2 GCP project)
@@ -128,11 +131,49 @@ security analysis assumes. The worker loads cabure-crypto's **CJS** build via
 `createRequire` (its ESM bundle does a dynamic `require()` plain Node rejects; the
 Next app only avoids this because webpack rewrites it).
 
-## Smoke test (contribution-free)
+## Testing
 
-The current head of any circuit is an already-verified chain — a perfect fixture.
-POST a circuit's `ptauUrl` / `initialZkeyUrl` / `initialZkeyHash` (as
-`genesisUrl`/`genesisSha256`) and `currentZkeyUrl` / `latestContributionHash` (as
-`zkeyUrl`/`zkeySha256`) to `/verify`; expect `{valid:true}`, a wrong `zkeySha256`
-→ 422, a wrong/absent token → 401/403. This exercises the full worker (fetch +
-`verifyChain` + auth) without submitting a contribution.
+Nothing here submits a contribution or mutates ceremony state.
+
+### 1. Worker in isolation — local, no deploy, no creds (validated 2026-07-08)
+
+Run the image locally and POST real public artifact URLs:
+
+```bash
+docker build -t ceremony-verifier:local verifier/
+docker run -d --name cv -e VERIFIER_TOKEN=test --memory=6g -p 8080:8080 ceremony-verifier:local
+# PTAU = the shared pot-<hash>.ptau on the live store; DEP/RQ = two circuits' current heads
+curl -X POST localhost:8080/verify -H 'x-verifier-token: test' -H 'content-type: application/json' \
+  -d '{"ptauUrl":"…pot-….ptau","genesisUrl":"…deposit/…zkey","genesisSha256":"0x…",
+       "zkeyUrl":"…deposit/…zkey","zkeySha256":"0x…"}'   # genesis==latest → {valid:true} (shortcut)
+```
+
+Confirmed: fetches the ~288 MB ptau + zkeys, loads cabure's CJS build, runs
+`verifyChain`, returns correct verdicts, enforces the `zkeySha256` pin (→ 422), and
+does **not** crash/OOM. A mismatched-circuit pair returns `{valid:false}`.
+
+**Not yet covered by the isolated test:** a true-positive on a real *valid
+multi-contribution chain* — i.e. `verifyChain(ptau, <real genesis>, <real head>)` →
+`{valid:true}`, which is both the acceptance path and the heavy multiexp/FFT/pairing
+compute that was OOMing on Vercel. That needs the real `initialZkeyUrl` +
+`initialZkeyHash` (KV-only). See test 2.
+
+### 2. Valid-chain acceptance — needs KV read (operator)
+
+With one circuit's real fields from KV (`ptauUrl`, `initialZkeyUrl`,
+`initialZkeyHash`, `currentZkeyUrl`, `latestContributionHash`), POST
+`genesisUrl=initialZkeyUrl`, `genesisSha256=initialZkeyHash`,
+`zkeyUrl=currentZkeyUrl`, `zkeySha256=latestContributionHash`. Expect `{valid:true}`
+— the current head is an already-verified chain from its genesis. Run it against the
+**local** container first, then against the deployed Cloud Run service (test 3).
+
+### 3. Route → worker (OIDC/IAM) — not locally reproducible; canary in prod
+
+`getVercelOidcToken()` only works in the Vercel runtime, and the WIF binding is
+scoped to the **production** deployment, so the route→worker leg can't be exercised
+locally or on a preview (preview's OIDC subject won't match the binding; it falls
+back to in-process). Validate it as a canary right after deploy: perform one
+contribution (e.g. the headless agent CLI on a mid-size circuit) and confirm a
+`[verifier] verify done valid=true …` line in
+`gcloud run services logs read ceremony-verifier`. Rollback is `vercel env rm
+CEREMONY_VERIFIER_URL production` + redeploy.
