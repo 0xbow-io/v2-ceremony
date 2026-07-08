@@ -22,6 +22,17 @@ export async function getJson<T>(key: string): Promise<T | null> {
   return (await redis().get<T>(key)) ?? null;
 }
 
+// Batch read: one MGET round trip instead of one GET per key. MGET deserializes
+// each value exactly as get() does (same base Command deserializer) and returns
+// null for missing keys, so callers get the same shape as N getJson() calls —
+// but at one Upstash command instead of N. Used by the hot read paths
+// (getAllCircuitStates) that the status/queue/eligibility polls hammer.
+export async function getJsonMany<T>(keys: string[]): Promise<(T | null)[]> {
+  if (keys.length === 0) return [];
+  const values = await redis().mget<(T | null)[]>(...keys);
+  return keys.map((_, index) => values[index] ?? null);
+}
+
 export async function setJson<T>(
   key: string,
   value: T,
