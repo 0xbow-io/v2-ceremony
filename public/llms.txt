@@ -68,6 +68,38 @@ npx --yes @wonderland/cabure-cli@latest contribute https://ceremony.privacypools
   --token "$CABURE_TOKEN" 2>&1 | tee cabure-progress.log
 ```
 
+**If `@latest` fails to start** with a module-load error like `Dynamic require of
+"url" is not supported` (a known packaging bug in the current v2 crypto build),
+fall back to the last known-good version `1.0.0` under Node 20 — it talks to the
+same server and its contributions are server-verified just the same:
+
+```bash
+npx --yes -p node@20 -p @wonderland/cabure-cli@1.0.0 \
+  cabure contribute https://ceremony.privacypools.com \
+  --token "$CABURE_TOKEN" 2>&1 | tee cabure-progress.log
+```
+
+> **IMPORTANT — on the v1 fallback, do the large circuits ONE AT A TIME.**
+> v1 does not refresh its queue slot during a long compute, so a plain
+> (no-`--circuit`) run queues *every* remaining circuit at once and the big
+> `transact_5x*` ones deadlock — you'll see `Not at front of the queue` on
+> submit, or the run stalls for many minutes with your id stuck as the circuit's
+> `currentParticipant`. **Do not wait it out** (it won't self-clear) and do not
+> conclude the ceremony is broken. Instead contribute each large circuit on its
+> own — a clean queue slot per circuit submits reliably:
+>
+> ```bash
+> for c in transact_5x1 transact_5x2 transact_5x3 transact_5x4 transact_5x5; do
+>   npx --yes -p node@20 -p @wonderland/cabure-cli@1.0.0 \
+>     cabure contribute https://ceremony.privacypools.com \
+>     --token "$CABURE_TOKEN" --circuit "$c" 2>&1 | tee -a cabure-progress.log
+> done
+> ```
+>
+> Re-running is safe — the server skips circuits you've already completed, so a
+> single-circuit retry only redoes the one that's pending. (This is a v1-only
+> quirk; the browser flow and a fixed v2 CLI refresh the queue during compute.)
+
 It prints a line per phase — `Queue`, `Download`, `Entropy`, `Contributing`,
 `Upload`, `Submit`. Report each circuit as it finishes; never abort a
 `Contributing` step (that's the slow zk compute — let it run). Watch from another
