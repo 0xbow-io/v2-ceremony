@@ -8,7 +8,13 @@ import {
   type CeremonyTierConfig,
   type TierId,
 } from "./ceremony-config";
-import { getJson, listRange, setIsMember, setMembers } from "./kv-store";
+import {
+  getJson,
+  getJsonMany,
+  listRange,
+  setIsMember,
+  setMembers,
+} from "./kv-store";
 
 // Seed of the contribution chain (32 zero bytes).
 const GENESIS_CHAIN_HASH = `0x${"0".repeat(64)}`;
@@ -110,9 +116,23 @@ export async function getCircuitState(
 
 export async function getAllCircuitStates(): Promise<CircuitState[]> {
   const config = getCeremonyConfig();
-  return await Promise.all(
-    config.circuits.map((circuit) => getCircuitState(circuit.id)),
+  // One MGET, not one GET per circuit. This is the hot read path behind the
+  // status/queue/eligibility polls; with ~27 circuits the per-key version fired
+  // ~27 Upstash commands per request, which is what exhausted the KV request
+  // quota under load. Batching keeps it at a single command.
+  const states = await getJsonMany<CircuitState>(
+    config.circuits.map((circuit) =>
+      kvKey(config.storage.circuitStatePrefix, circuit.id),
+    ),
   );
+  return states.map((state, index) => {
+    if (!state) {
+      throw new Error(
+        `Missing circuit state for ${config.circuits[index].id}. Run init:ceremony.`,
+      );
+    }
+    return state;
+  });
 }
 
 export async function getReceipts(): Promise<ContributionReceipt[]> {
