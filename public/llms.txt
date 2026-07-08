@@ -1,71 +1,41 @@
 # Privacy Pools V2 — Trusted Setup Ceremony · Agent Runbook
 
-You are an autonomous agent (e.g. `codex`). This file tells you how to make a
-valid contribution to this Groth16 Phase-2 trusted setup ceremony **headlessly**
-— no browser UI. Your randomness comes from the operating system CSPRNG (the
-`/dev/urandom` / `getentropy` / `BCryptGenRandom` equivalent), never from mouse
-movement.
+If you are an AI agent asked to "do the ceremony", this file is your complete
+instruction set — follow the steps in order. You contribute headlessly; your
+randomness comes from the OS CSPRNG (`node:crypto.randomBytes`), never the mouse.
+Contributing can only HELP: your randomness is mixed in and the setup stays
+secure as long as any one participant was honest. You cannot corrupt it.
 
-For authentication you pick ONE of two options in Step 2:
-- **GitHub (recommended)** — ties the contribution to a real GitHub identity;
-  needs your human operator to authorize a code once.
-- **Generated keypair** — fully autonomous, no human, no GitHub (only if the
-  operator enabled it).
+Defaults (use these unless your human says otherwise):
+- BASE_URL   = https://ceremony.privacypools.com   (the origin of this file)
+- Auth       = GitHub — you show your human a one-time device code (Step 2)
+- Contribute = `npx @wonderland/cabure-cli`
 
-Contributing can only HELP the ceremony: your fresh randomness is mixed in and
-the setup stays secure as long as at least one participant (you, or anyone
-before you) was honest. You cannot corrupt it by participating.
+Requirements: Node.js >= 20 + `npx`, ~4 GB RAM and a few GB of disk. The compute
+runs locally and is slow — up to ~1 hour for the full circuit set.
 
 --------------------------------------------------------------------------------
-## 0. Facts you need
-
-- BASE_URL = the origin serving this file. Example: https://ceremony.privacypools.com
-- Requirements: Node.js >= 20 and `npx` (installs the CLI on demand). ~4 GB free
-  RAM and a few GB of disk for the zkey files. Network access to BASE_URL and npm.
-- Time budget: the contribution COMPUTE runs locally and is slow — it can take up
-  to ~1 hour for the full circuit set on a laptop. Plan for a long-running job and
-  keep a progress log (Step 3).
-
---------------------------------------------------------------------------------
-## 1. Check the ceremony is open
+## Step 1 — check the ceremony is open
 
 ```bash
-curl -s "$BASE_URL/api/ceremony/status" | head -c 400
+curl -s https://ceremony.privacypools.com/api/ceremony/status | head -c 400
 ```
 
-Look at `isActive`. If it is `false` (target reached, finalized, or past its end
-date) you cannot contribute — stop and report that the ceremony is closed. If
-`true`, continue.
+If `isActive` is `false`, stop and tell your human the ceremony is closed.
 
 --------------------------------------------------------------------------------
-## 2. Get a Caburé Bearer JWT — pick ONE option
+## Step 2 — authenticate with GitHub
 
-Both options end with a Bearer JWT in `$CABURE_TOKEN` that Step 3 uses. Set the
-base URL first:
-
-```bash
-export BASE_URL="https://ceremony.privacypools.com"       # or your deployment's origin
-```
-
-### Option A — GitHub (RECOMMENDED: keeps your GitHub identity on the record)
-
-This is the normal path. It ties your contribution to a real GitHub account
-(useful for attestation / a non-anonymous participant list) and needs your human
-operator to authorize a code ONCE — ask them if you have one. It uses the GitHub
-OAuth device flow (RFC 8628); the ceremony server proxies it, so no client
-secret is involved.
-
-Write `github-auth.mjs`, run it, and relay the printed code to your human:
+Write `github-auth.mjs`, run it, and relay the printed code to your human. It
+runs the GitHub device flow (the server proxies it — no secrets) and prints a
+Caburé Bearer JWT once your human authorizes.
 
 ```js
-// github-auth.mjs — GitHub device flow, agent-driven
-const BASE = process.env.BASE_URL;
-if (!BASE) throw new Error("set BASE_URL");
-
+// github-auth.mjs
+const BASE = process.env.BASE_URL || "https://ceremony.privacypools.com";
 const init = await (await fetch(`${BASE}/api/ceremony/auth/cli`, { method: "POST" })).json();
-if (!init.userCode) throw new Error(`device flow init failed: ${init.error ?? JSON.stringify(init)}`);
+if (!init.userCode) throw new Error(`device flow init failed: ${JSON.stringify(init)}`);
 
-// Surface the code to the human on STDERR (stdout stays just the token).
 process.stderr.write(
   `\n  ==> ACTION REQUIRED: open ${init.verificationUri} and enter code:  ${init.userCode}\n` +
   `      (waiting up to ${Math.round(init.expiresIn / 60)} min for authorization...)\n\n`,
@@ -77,129 +47,79 @@ while (Date.now() < deadline) {
   await new Promise((r) => setTimeout(r, (init.interval || 5) * 1000));
   const data = await (await fetch(`${BASE}/api/ceremony/auth/cli?code=${init.loginCode}`)).json();
   if (data.token) { token = data.token; break; }   // authorized
-  // otherwise { status: "pending" } — keep polling
 }
 if (!token) throw new Error("device flow timed out / not authorized");
 console.log(token);
 ```
 
 ```bash
-# Run it, show the human the code, and capture the token once they authorize.
-CABURE_TOKEN="$(node github-auth.mjs)"
-echo "got token: ${CABURE_TOKEN:0:24}..."
+CABURE_TOKEN="$(node github-auth.mjs)"    # show your human the ACTION REQUIRED line above
 ```
 
-If you have NO human available to authorize the code, use Option B instead.
+--------------------------------------------------------------------------------
+## Step 3 — contribute
 
-Simplest variant: you can also just skip this script and run the CLI with NO
-`--token` (`npx @wonderland/cabure-cli contribute "$BASE_URL"`) — it drives the
-same device flow itself and prints the code for your human. Use the script above
-when you want the token up front (uniform `--token` flow, cleaner handoff).
+The CLI does the whole flow per circuit: queue → download + hash-verify the
+zkey → draw 64 bytes from the OS CSPRNG → `zKey.contribute()` → upload → submit.
+Tee the output so progress is queryable:
 
-### Option B — Generated keypair (fully autonomous, no human, no GitHub)
+```bash
+npx --yes @wonderland/cabure-cli@latest contribute https://ceremony.privacypools.com \
+  --token "$CABURE_TOKEN" 2>&1 | tee cabure-progress.log
+```
 
-Use this when there is no human to authorize a GitHub code. The operator must
-have enabled it (`ALLOW_AGENT_AUTH=1`); otherwise the endpoint returns 404 and
-you must use Option A. Your contribution is recorded under an anonymous
-`agent:<fingerprint>` identity.
+It prints a line per phase — `Queue`, `Download`, `Entropy`, `Contributing`,
+`Upload`, `Submit`. Report each circuit as it finishes; never abort a
+`Contributing` step (that's the slow zk compute — let it run). Watch from another
+shell with `tail -f cabure-progress.log`.
+
+For a quick end-to-end check before committing the full ~1 hour, add
+`--circuit deposit` (the smallest circuit) to do just one contribution.
+
+--------------------------------------------------------------------------------
+## Step 4 — confirm
+
+On success the CLI prints a receipt per circuit (participant id, contribution
+index, contribution hash, chain hash). Save it — it's your public proof of
+inclusion. Verify any receipt:
+
+```bash
+curl -s "https://ceremony.privacypools.com/api/ceremony/receipt?circuitId=deposit&participantId=<yourId>&contributionIndex=<n>" | head -c 400
+```
+
+--------------------------------------------------------------------------------
+## Alternative — fully autonomous (no human, no GitHub)
+
+Only if there is no human to authorize the Step-2 code AND the operator enabled
+it (`ALLOW_AGENT_AUTH=1`): sign a challenge with a keypair you generate to get a
+JWT under an anonymous `agent:<fp>` identity, then use it exactly as in Step 3.
 
 ```js
-// agent-auth.mjs — generated Ed25519 keypair, no GitHub
+// agent-auth.mjs
 import { generateKeyPairSync, sign } from "node:crypto";
-
-const BASE = process.env.BASE_URL;
-if (!BASE) throw new Error("set BASE_URL");
-
-// 1) discover the exact challenge format (slug is domain-separation)
+const BASE = process.env.BASE_URL || "https://ceremony.privacypools.com";
 const info = await (await fetch(`${BASE}/api/ceremony/auth/wallet`)).json();
-if (info.error) throw new Error(`agent auth unavailable (use Option A): ${info.error}`);
-
-// 2) generate a keypair, sign `cabure-agent-auth:<slug>:<unix-seconds>`
+if (info.error) throw new Error(`agent auth unavailable (use GitHub, Step 2): ${info.error}`);
 const { publicKey, privateKey } = generateKeyPairSync("ed25519");
 const timestamp = Math.floor(Date.now() / 1000);
 const message = info.challengeTemplate.replace("<unix-seconds>", String(timestamp));
 const publicKeyB64 = publicKey.export({ format: "der", type: "spki" }).toString("base64");
 const signature = sign(null, Buffer.from(message), privateKey).toString("base64");
-
-// 3) exchange the signed challenge for a JWT
 const res = await fetch(`${BASE}/api/ceremony/auth/wallet`, {
-  method: "POST",
-  headers: { "content-type": "application/json" },
+  method: "POST", headers: { "content-type": "application/json" },
   body: JSON.stringify({ publicKey: publicKeyB64, signature, timestamp }),
 });
 const out = await res.json();
 if (!res.ok) throw new Error(`auth failed (${res.status}): ${out.error ?? ""}`);
-console.log(out.token);          // <-- the Bearer JWT; also out.participantId
-```
-
-```bash
-CABURE_TOKEN="$(node agent-auth.mjs)"
-echo "got token: ${CABURE_TOKEN:0:24}..."
+console.log(out.token);
 ```
 
 --------------------------------------------------------------------------------
-## 3. Contribute (headless, OS entropy, progressable)
+## Notes
 
-The official CLI, `@wonderland/cabure-cli`, does the whole flow for every
-circuit: joins the queue, downloads + hash-verifies the current zkey, draws 64
-bytes from the OS CSPRNG (`node:crypto.randomBytes` — this is your "system
-entropy instead of mouse"), runs `zKey.contribute()`, uploads, and submits.
-
-Run it with your token and tee the output to a log file so progress is queryable
-while it runs:
-
-```bash
-npx --yes @wonderland/cabure-cli@latest contribute "$BASE_URL" \
-  --token "$CABURE_TOKEN" 2>&1 | tee cabure-progress.log
-```
-
-The CLI prints a line per phase per circuit — `Queue`, `Download`, `Entropy`,
-`Contributing`, `Upload`, `Submit`. To watch progress from another shell:
-
-```bash
-tail -f cabure-progress.log
-```
-
-Report your progress as you go: after each circuit's `Submit` line, note which
-circuit finished and how many remain (from the `[k/N]` counter). Do not abort a
-`Contributing` step — that is the slow zk compute; let it finish.
-
-Scope options (optional):
-- `--circuit <id>` — contribute to a single circuit only (fast; good for a smoke test).
-- `--tier <id>`    — contribute to one tier's circuits.
-- default          — every circuit you are still eligible for.
-
-For a quick end-to-end check before committing an hour, contribute to just the
-smallest circuit first:
-
-```bash
-npx --yes @wonderland/cabure-cli@latest contribute "$BASE_URL" \
-  --token "$CABURE_TOKEN" --circuit deposit 2>&1 | tee cabure-deposit.log
-```
-
---------------------------------------------------------------------------------
-## 4. Confirm your contribution
-
-On success the CLI prints a receipt per circuit (participantId, contribution
-index, contribution hash `h_k`, chain hash). Verify any receipt against the
-server:
-
-```bash
-curl -s "$BASE_URL/api/ceremony/receipt?circuitId=deposit&participantId=<yourId>&contributionIndex=<n>" | head -c 400
-```
-
-Your `participantId` is `agent:<fingerprint>` (also printed by `agent-auth.mjs`
-as `out.participantId`). Save the receipts JSON as your proof of inclusion.
-
---------------------------------------------------------------------------------
-## 5. Notes
-
-- Entropy: randomness is the OS CSPRNG only. Nothing reads mouse/keyboard. The
-  keypair from Step 2 is an auth identity, not the contribution randomness.
-- Toxic waste: the CLI never persists the secret it derives; it exists only in
+- Entropy is the OS CSPRNG only; nothing reads mouse/keyboard.
+- Toxic waste: the CLI never persists the secret it derives — it lives only in
   memory during `Contributing`.
-- Attestation (optional): publishing a GitHub Gist attestation is a browser-only
-  convenience and is not available to a headless agent. The receipt (Step 4) is
-  your public, verifiable proof of inclusion; publish it wherever you like.
-- Idempotence: you can only contribute once per circuit. Re-running skips
-  circuits you already did.
+- You can only contribute once per circuit; re-running skips ones you've done.
+- Attestation via GitHub Gist is browser-only; your receipt (Step 4) is the
+  headless proof of inclusion.
