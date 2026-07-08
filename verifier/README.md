@@ -88,11 +88,6 @@ Verification itself is mandatory in production regardless (`NODE_ENV ===
 The four `GCP_*` vars enable the IAM layer; if absent, the route sends the
 shared-secret header only (a public-URL fallback, or local testing).
 
-## Prerequisites before enabling in production
-
-1. OIDC enabled for the Vercel project (a `VERCEL_OIDC_TOKEN` pulls successfully).
-2. Route change deployed (this PR).
-
 ## Infrastructure (provisioned in the v2 GCP project)
 
 - Cloud Run service — private, gen2, `concurrency=1` (one verify per instance),

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import {
+  advanceActiveSlot,
   getAllCircuitStates,
   getCircuitState,
   getManifest,
@@ -8,6 +9,7 @@ import {
   isCeremonyActive,
   kvKey,
   pruneExpiredEntries,
+  resolveMaxActiveSeconds,
   selectCircuitsForTier,
 } from "@/lib/ceremony-state";
 import {
@@ -174,6 +176,20 @@ export async function POST(request: NextRequest) {
         now,
       );
 
+      // Enforce the hard active-slot cap: a front-runner who has held the slot
+      // past this circuit's cap is rotated to the back so the line advances even
+      // though their heartbeat keeps joinedAt fresh. Every caller (including
+      // participants waiting behind the front) runs this under the lock and
+      // persists it, so a stuck leader is evicted by the people behind them.
+      const circuitConfig = config.circuits.find((c) => c.id === circuitId);
+      if (circuitConfig) {
+        circuit.queue = advanceActiveSlot(
+          circuit.queue,
+          resolveMaxActiveSeconds(circuitConfig),
+          now,
+        );
+      }
+
       let index = circuit.queue.findIndex(
         (entry) => entry.participantId === participantId,
       );
@@ -250,17 +266,24 @@ export async function GET(request: NextRequest) {
   }
   const circuit = await getCircuitState(circuitId);
 
-  // Read-only: prune in memory for an accurate position but do NOT persist.
-  // Persisting would overwrite the whole circuit-state key and could revert a
-  // concurrent contribution commit. The POST and contribute paths prune under
-  // the lock, so expired entries are cleaned there.
+  // Read-only: prune AND apply the active-slot cap in memory for an accurate
+  // position, but do NOT persist. Persisting would overwrite the whole
+  // circuit-state key and could revert a concurrent contribution commit. The
+  // POST and contribute paths do this under the lock and persist it, so this
+  // just mirrors what the caller's next heartbeat will make authoritative.
+  const now = Date.now();
   const pruned = pruneExpiredEntries(
     circuit.queue,
     config.queueTimeoutSeconds,
-    Date.now(),
+    now,
+  );
+  const active = advanceActiveSlot(
+    pruned,
+    resolveMaxActiveSeconds(knownCircuit),
+    now,
   );
 
-  const index = pruned.findIndex(
+  const index = active.findIndex(
     (entry) => entry.participantId === participantId,
   );
 

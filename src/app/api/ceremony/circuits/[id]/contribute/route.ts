@@ -13,6 +13,7 @@ import { verifyRemote } from "@/lib/external-verifier";
 import { loadPtau } from "@/lib/ptau-loader";
 import { getParticipant } from "@/lib/participant-auth";
 import {
+  advanceActiveSlot,
   computeChainHash,
   getCircuitState,
   getManifest,
@@ -20,6 +21,7 @@ import {
   isCircuitActive,
   kvKey,
   pruneExpiredEntries,
+  resolveMaxActiveSeconds,
   type CircuitState,
   type ContributionReceipt,
   type ManifestState,
@@ -232,6 +234,7 @@ async function checkEligibility(
   manifest: ManifestState,
   targetContributions: number,
   queueTimeoutSeconds: number,
+  maxActiveSeconds: number,
 ): Promise<EligibilityResult> {
   const circuit = await getCircuitState(id);
 
@@ -240,6 +243,11 @@ async function checkEligibility(
   }
 
   circuit.queue = pruneExpiredEntries(circuit.queue, queueTimeoutSeconds);
+  // Apply the same active-slot cap the queue routes enforce, so a stuck leader
+  // who overstayed is rotated off here too and the real next participant passes
+  // the front-of-queue check. On the accept path this mutated queue is what
+  // writeContribution persists.
+  circuit.queue = advanceActiveSlot(circuit.queue, maxActiveSeconds);
 
   if (circuit.queue[0]?.participantId !== participantId) {
     return { ok: false, error: "Not at front of the queue", status: 409 };
@@ -323,6 +331,7 @@ export async function POST(
     manifest,
     circuitConfig.targetContributions,
     config.queueTimeoutSeconds,
+    resolveMaxActiveSeconds(circuitConfig),
   );
   if (!precheck.ok) {
     await deleteBinary(blobUrl).catch(() => {});
@@ -565,6 +574,7 @@ export async function POST(
         lockedManifest,
         circuitConfig.targetContributions,
         config.queueTimeoutSeconds,
+        resolveMaxActiveSeconds(circuitConfig),
       );
       if (!eligible.ok) {
         await deleteBinary(stored.url).catch(() => {});
