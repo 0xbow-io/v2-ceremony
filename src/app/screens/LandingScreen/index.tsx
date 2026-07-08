@@ -28,19 +28,38 @@ export function LandingScreen({
   const [downloadingReceipts, setDownloadingReceipts] = useState(false);
 
   const { copy } = config;
+
+  // "Contributors" = how many distinct people have taken part. A participant can
+  // contribute at most once per circuit, and the deposit circuit (first in the
+  // array) is the entry every contributor runs, so its contribution count is the
+  // contributor count. The per-circuit totals are already in the status payload.
+  const depositCircuitId = config.circuits[0]?.id;
+  const totalContributors =
+    status?.circuits.find((c) => c.circuitId === depositCircuitId)
+      ?.totalContributions ?? 0;
+
+  const isActive = status?.isActive ?? true;
+  const footerLines = copy.landing.footer.split("\n");
+  const hasEligibleCircuits = eligibility?.hasEligibleCircuits ?? true;
+  const hasReceipts = (eligibility?.contributedCircuitIds.length ?? 0) > 0;
+
+  // Ceremony-wide progress — shown to visitors and while a participant still has
+  // circuits left to contribute to.
   const totalContributions = status?.totalContributions ?? 0;
   const targetContributions =
     status?.targetContributions ?? config.targetContributions;
-  const progress = targetContributions
+  const ceremonyProgress = targetContributions
     ? Math.min(
         100,
         Math.round((totalContributions / targetContributions) * 100),
       )
     : 0;
-  const isActive = status?.isActive ?? true;
-  const footerLines = copy.landing.footer.split("\n");
-  const hasEligibleCircuits = eligibility?.hasEligibleCircuits ?? true;
-  const hasReceipts = (eligibility?.contributedCircuitIds.length ?? 0) > 0;
+  // Once the signed-in participant has no eligible circuits left — the exact
+  // state that shows the "You have already contributed" card below — their
+  // personal progress is complete, so surface 100% instead of the ceremony-wide
+  // figure.
+  const hasContributedEverything = isAuthenticated && !hasEligibleCircuits;
+  const progress = hasContributedEverything ? 100 : ceremonyProgress;
   const beginCta = eligibilityLoading
     ? copy.landing.eligibilityLoadingCta
     : copy.landing.beginCta;
@@ -68,7 +87,7 @@ export function LandingScreen({
   const statsData = [
     {
       label: copy.landing.stats.contributionsLabel,
-      value: totalContributions.toLocaleString(),
+      value: totalContributors.toLocaleString(),
     },
     {
       label: copy.landing.stats.circuitsLabel,
