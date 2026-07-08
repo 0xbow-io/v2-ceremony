@@ -71,6 +71,7 @@ export interface CeremonyCopy {
     endedSubtitle: string;
     endedDescription: string;
     verifyCta: string;
+    forAgentsCta: string;
     footer: string;
   };
   entropy: {

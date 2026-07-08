@@ -101,6 +101,7 @@ export function LandingScreen({
         </div>
 
         <Button onClick={onVerify}>{copy.landing.verifyCta}</Button>
+        <ForAgentsButton label={copy.landing.forAgentsCta} />
       </ScreenWrapper>
     );
   }
@@ -170,6 +171,8 @@ export function LandingScreen({
         {copy.landing.verifyCta}
       </Button>
 
+      <ForAgentsButton label={copy.landing.forAgentsCta} />
+
       <p className={styles.footer}>
         {footerLines.map((line, index) => (
           <span key={line}>
@@ -179,6 +182,21 @@ export function LandingScreen({
         ))}
       </p>
     </ScreenWrapper>
+  );
+}
+
+// Opens the machine-readable runbook (public/llms.txt) that lets an autonomous
+// agent (e.g. `codex`) contribute headlessly with a generated keypair + OS
+// entropy — no browser, no GitHub login.
+function ForAgentsButton({ label }: { label: string }) {
+  return (
+    <Button
+      variant="secondary"
+      size="small"
+      onClick={() => window.open("/llms.txt", "_blank", "noopener,noreferrer")}
+    >
+      {label}
+    </Button>
   );
 }
 
