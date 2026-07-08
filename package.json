@@ -13,7 +13,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@wonderland/cabure-crypto": "2.0.0-beta.0",
+    "@wonderland/cabure-crypto": "2.0.0",
     "@next/env": "15.5.12",
     "@tanstack/react-query": "5.91.0",
     "@upstash/redis": "1.36.2",
