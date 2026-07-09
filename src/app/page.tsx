@@ -11,6 +11,7 @@ import { CompleteScreen } from "./screens/CompleteScreen";
 import { VerifyScreen } from "./screens/VerifyScreen";
 
 import { getReceipt } from "@/lib/api";
+import { parseReceiptInput } from "@/lib/receipt-parser";
 import { type CeremonyStep, type TierId } from "@/lib/ceremony-config";
 import { useCeremonyConfig } from "@/hooks/useCeremonyConfig";
 import { useCeremonyStatus } from "@/hooks/useCeremonyStatus";
@@ -119,60 +120,25 @@ export default function CeremonyPage() {
   };
 
   const handleVerifyReceipt = async (input: string) => {
-    const parsed = JSON.parse(input) as
-      | {
-          circuitId?: string;
-          participantId?: string;
-          contributionIndex?: number;
-          contributionHash?: string;
-        }
-      | Array<{
-          circuitId?: string;
-          participantId?: string;
-          contributionIndex?: number;
-          contributionHash?: string;
-        }>;
-
-    const receiptList = Array.isArray(parsed) ? parsed : [parsed];
-    if (receiptList.length === 0) {
-      throw new Error(config.copy.verify.invalidReceipt);
-    }
-
-    for (const receipt of receiptList) {
-      if (
-        !receipt?.circuitId ||
-        !receipt.participantId ||
-        receipt.contributionIndex == null ||
-        !receipt.contributionHash
-      ) {
-        throw new Error(config.copy.verify.invalidReceipt);
-      }
-    }
-
-    const seen = new Set<string>();
-    for (const receipt of receiptList) {
-      const key = `${receipt.circuitId}#${receipt.contributionIndex}`;
-      if (seen.has(key)) {
-        throw new Error(config.copy.verify.duplicateReceipt);
-      }
-      seen.add(key);
-    }
+    const receiptList = parseReceiptInput(input, {
+      invalidReceipt: config.copy.verify.invalidReceipt,
+      duplicateReceipt: config.copy.verify.duplicateReceipt,
+    });
 
     return await Promise.all(
       receiptList.map(async (receipt) => {
         const stored = await getReceipt({
-          circuitId: receipt.circuitId as string,
-          participantId: receipt.participantId as string,
-          contributionIndex: receipt.contributionIndex as number,
-          contributionHash: receipt.contributionHash as string,
+          circuitId: receipt.circuitId,
+          contributionIndex: receipt.contributionIndex,
+          contributionHash: receipt.contributionHash,
         });
         if (
-          (receipt.contributionHash as string).toLowerCase() !==
+          receipt.contributionHash.toLowerCase() !==
           stored.contributionHash.toLowerCase()
         ) {
           throw new Error(
             formatTemplate(config.copy.verify.hashMismatch, {
-              circuitId: receipt.circuitId as string,
+              circuitId: receipt.circuitId,
               contributionIndex: String(receipt.contributionIndex),
             }),
           );

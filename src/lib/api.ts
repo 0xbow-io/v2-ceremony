@@ -1,3 +1,5 @@
+import type { OwnerReceipt, PublicReceipt } from "./public-receipt";
+
 export interface CircuitStatus {
   circuitId: string;
   targetContributions: number;
@@ -46,21 +48,12 @@ export interface QueuePosition {
   estimatedWaitSeconds: number;
 }
 
-export interface ReceiptResponse {
-  success: boolean;
-  circuitId: string;
-  participantId: string;
-  contributionIndex: number;
-  contributionHash: string;
-  clientContributionHash: string | null;
-  // Genuine contribution hash (h_k): the Blake2b that the chain folds over and
-  // that the attestation publishes. The /receipt and /participant/receipts
-  // routes already spread the stored receipt, so this value flows through.
-  serverContributionHash: string;
-  // h_{k-1}: predecessor hash for the attestation; null for the first.
-  previousContributionHash: string | null;
-  chainHash: string;
-  timestamp: number;
+export interface ReceiptResponse extends OwnerReceipt {
+  success: true;
+}
+
+export interface PublicReceiptResponse extends PublicReceipt {
+  success: true;
 }
 
 export interface ZkeyInfo {
@@ -141,7 +134,6 @@ export async function getParticipantEligibility(
 }
 
 export interface ParticipantReceiptsResponse {
-  participantId: string;
   receipts: ReceiptResponse[];
 }
 
@@ -284,20 +276,16 @@ export async function submitContribution(options: {
 
 export async function getReceipt(options: {
   circuitId: string;
-  participantId: string;
   contributionIndex: number;
-  contributionHash?: string;
+  contributionHash: string;
   signal?: AbortSignal;
-}): Promise<ReceiptResponse> {
+}): Promise<PublicReceiptResponse> {
   const params = new URLSearchParams({
     circuitId: options.circuitId,
-    participantId: options.participantId,
     contributionIndex: String(options.contributionIndex),
+    contributionHash: options.contributionHash,
   });
-  if (options.contributionHash) {
-    params.set("contributionHash", options.contributionHash);
-  }
-  return await apiFetch<ReceiptResponse>(
+  return await apiFetch<PublicReceiptResponse>(
     `/api/ceremony/receipt?${params.toString()}`,
     { signal: options.signal },
   );

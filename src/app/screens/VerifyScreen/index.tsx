@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 
-import type { ReceiptResponse } from "@/lib/api";
+import type { PublicReceiptResponse } from "@/lib/api";
 import { useCeremonyConfig } from "@/hooks/useCeremonyConfig";
 import { Button } from "@/app/components/Button";
 import { ScreenWrapper } from "@/app/components/ScreenWrapper";
@@ -13,14 +13,14 @@ export function VerifyScreen({
   onVerify,
 }: {
   onBack: () => void;
-  onVerify: (receiptJson: string) => Promise<ReceiptResponse[]>;
+  onVerify: (receiptJson: string) => Promise<PublicReceiptResponse[]>;
 }) {
   const { copy } = useCeremonyConfig();
   const [input, setInput] = useState("");
   const [status, setStatus] = useState<"idle" | "verifying" | "success" | "error">(
     "idle",
   );
-  const [result, setResult] = useState<ReceiptResponse[] | null>(null);
+  const [result, setResult] = useState<PublicReceiptResponse[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const handleVerify = async () => {
