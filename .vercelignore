@@ -24,3 +24,6 @@ node_modules
 /public/genesis
 /public/finalize
 /circuits
+
+# Standalone Cloud Run verify worker — built and deployed separately, never to Vercel.
+/verifier
