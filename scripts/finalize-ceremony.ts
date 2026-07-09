@@ -7,13 +7,19 @@ import { loadEnvConfig } from "@next/env";
 import {
   applyBeacon,
   exportVerificationKey,
-  type Groth16VerificationKey,
   parseMpcParams,
   verify,
   verifyChainForCircuit,
 } from "@wonderland/cabure-crypto";
 
-import { getEndDateDeadlineMs } from "@/lib/ceremony-state";
+import {
+  getEndDateDeadlineMs,
+  type ContributionReceipt,
+} from "@/lib/ceremony-state";
+import {
+  buildFinalTranscript,
+  type FinalCircuitSummary,
+} from "@/lib/final-transcript";
 import { getJson, listRange, setJson } from "@/lib/kv-store";
 import { ceremonyConfig } from "../ceremony.config";
 
@@ -69,19 +75,6 @@ interface ManifestState {
   finalizingAt?: number;
   finalizeId?: string;
   finalizedAt?: number;
-}
-
-interface ContributionReceipt {
-  circuitId: string;
-  participantId: string;
-  contributionIndex: number;
-  contributionHash: string;
-  clientContributionHash: string | null;
-  // Server-recomputed Blake2b hash (snarkjs hashPubKey) of the contribution.
-  // The finalize re-walk matches the final zkey's embedded hashes against this.
-  serverContributionHash: string;
-  chainHash: string;
-  timestamp: number;
 }
 
 const OUTPUT_DIR = path.resolve(process.cwd(), "public", "finalize");
@@ -494,15 +487,7 @@ async function main() {
 
     await mkdir(OUTPUT_DIR, { recursive: true });
 
-    const circuitSummaries: Array<{
-      circuitId: string;
-      totalContributions: number;
-      finalChainHash: string;
-      finalContributionHash: string;
-      finalZkeyHash: string;
-      finalZkeyPath: string;
-      verificationKey: Groth16VerificationKey;
-    }> = [];
+    const circuitSummaries: FinalCircuitSummary[] = [];
 
     for (const circuitConfig of circuitConfigs) {
       const state = circuitStates.find((s) => s.id === circuitConfig.id)!;
@@ -655,22 +640,22 @@ async function main() {
 
     console.log("Generating transcript...");
     const finalizedAt = Date.now();
-    const receipts = await listRange<ContributionReceipt>(storage.receiptsPath);
+    const storedReceipts = await listRange<ContributionReceipt>(
+      storage.receiptsPath,
+    );
 
-    const transcript = {
-      ceremony: {
-        name: manifest.ceremonyName,
-        targetContributions: manifest.targetContributions,
-        startedAt: manifest.startedAt,
-        endDate: manifest.endDate,
-        beaconHash: `0x${beaconHex}`,
-        beaconSource: beacon.source,
-        ...(beacon.slot !== undefined && { beaconSlot: beacon.slot }),
-        finalizedAt,
-      },
+    const transcript = buildFinalTranscript({
+      name: manifest.ceremonyName,
+      targetContributions: manifest.targetContributions,
+      startedAt: manifest.startedAt,
+      endDate: manifest.endDate,
+      beaconHash: `0x${beaconHex}`,
+      beaconSource: beacon.source,
+      beaconSlot: beacon.slot,
+      finalizedAt,
       circuits: circuitSummaries,
-      receipts,
-    };
+      storedReceipts,
+    });
 
     const transcriptPath = path.join(OUTPUT_DIR, "transcript.json");
     await writeFile(transcriptPath, JSON.stringify(transcript, null, 2));
