@@ -1,13 +1,13 @@
-# Privacy Pools V2 — Trusted Setup Ceremony
+# Privacy Pools V2: Trusted Setup Ceremony
 
 A browser-based **Groth16 Phase-2 trusted setup ceremony** for the Privacy Pools V2
 zero-knowledge circuits. Anyone can contribute fresh randomness from their browser;
 the app coordinates the queue, stores the proving keys, verifies every contribution,
-and — once finished — publishes everything you need to check the result yourself.
+and, once finished, publishes everything you need to check the result yourself.
 
 > **The one thing to remember about a trusted setup:** it is secure as long as **at
 > least one** participant was honest and destroyed their secret randomness. You do not
-> have to trust the organizers, the other contributors, or this website — you only
+> have to trust the organizers, the other contributors, or this website. You only
 > have to trust *yourself*, or anyone else who contributed honestly. This document
 > explains how to contribute, and how to verify the whole thing independently.
 
@@ -32,7 +32,7 @@ and — once finished — publishes everything you need to check the result your
 Privacy Pools V2 uses Groth16 zk-SNARKs. Groth16 needs a **circuit-specific
 proving key** (a `.zkey`), and generating that key involves secret randomness (often
 called *toxic waste*). If a single party generated the key alone and kept that
-randomness, they could forge proofs — e.g. withdraw funds that were never deposited.
+randomness, they could forge proofs, e.g. withdraw funds that were never deposited.
 
 A **Phase-2 trusted setup ceremony** removes that risk by having many independent
 people each fold their own secret randomness into the key, one after another, and then
@@ -43,8 +43,8 @@ This app runs that ceremony for all **27 Privacy Pools V2 circuits** entirely in
 browser:
 
 - **Your randomness never leaves your device.** The contribution is computed in a
-  WebAssembly worker in your browser. Only the transformed proving key is uploaded —
-  the secret is zeroed from memory immediately and never written to disk or sent to the
+  WebAssembly worker in your browser. Only the transformed proving key is uploaded.
+  The secret is zeroed from memory immediately and never written to disk or sent to the
   coordinator.
 - **Every contribution is verified** on the server before it is accepted, and the
   entire chain is re-verified from the original parameters at finalization.
@@ -73,7 +73,7 @@ browser:
    server verifies the new key genuinely extends the chain and records the
    contribution's hash in a running **hash chain**.
 3. **Finalization.** When the target is reached (or the deadline passes), the operator
-   applies a **beacon** — by default the RANDAO reveal from a finalized Ethereum
+   applies a **beacon**, by default the RANDAO reveal from a finalized Ethereum
    beacon-chain slot, which is public and was unpredictable in advance. Before doing so
    the server re-verifies the whole chain from the pinned genesis and re-walks it
    against the recorded hashes. It then exports each circuit's **verification key** and
@@ -90,7 +90,7 @@ The ceremony covers 27 circuits. Contributors contribute to every circuit in seq
 | --- | --- |
 | `deposit` | Deposit funds into the privacy pool. |
 | `ragequit` | Exit the pool and withdraw your full deposit. |
-| `transact_NxM` (N,M ∈ 1..5) | A private transfer with **N** input notes and **M** output notes — 25 variants, from `transact_1x1` to `transact_5x5`. |
+| `transact_NxM` (N,M ∈ 1..5) | A private transfer with **N** input notes and **M** output notes: 25 variants, from `transact_1x1` to `transact_5x5`. |
 
 Larger `N×M` circuits have more constraints and take longer to contribute to. Exact
 constraint counts are listed in [`ceremony.config.ts`](./ceremony.config.ts).
@@ -105,8 +105,11 @@ constraint counts are listed in [`ceremony.config.ts`](./ceremony.config.ts).
 
 - A **desktop browser** (the contribution runs a heavy WASM computation; mobile is not
   supported).
-- A **GitHub account** — sign-in is required purely to prevent spam and to give each
-  participant a place in the queue. No other data is collected.
+- A **GitHub account**: sign-in is required to prevent spam, enforce contribution
+  eligibility, and give each participant a place in the queue. The coordinator keeps
+  the account identifier in its access-control state and stored receipt, but public
+  status, receipt lookup, downloaded receipts, and the final transcript do not publish
+  it.
 - **Time and a device that stays awake.** Contributing to all 27 circuits runs entirely
   in your browser and takes anywhere from ~15 minutes to well over an hour depending on
   your hardware and connection (see [How long it takes](#how-long-it-takes)). Keep the
@@ -125,7 +128,7 @@ constraint counts are listed in [`ceremony.config.ts`](./ceremony.config.ts).
 
 ### How long it takes
 
-Plan for it to take a while — **this is normal and expected.** For each of the 27
+Plan for it to take a while. **This is normal and expected.** For each of the 27
 circuits your browser (1) downloads the current proving key, (2) computes your
 contribution, and (3) uploads the result. The larger circuits (the `transact_5x5` end)
 have bigger keys, so both the transfer and the computation grow. Total time is dominated
@@ -137,7 +140,7 @@ by your **CPU** (the compute) and your **connection speed** (the up/downloads).
 | Recent laptop (e.g. M2/M3 Pro) | ~300 Mbps | ~35 min* |
 | Apple M1 Max | ~100 Mbps | ~1 h 15 min |
 
-<sub>*Interpolated. These are rough figures from limited early runs — treat them as a
+<sub>*Interpolated. These are rough figures from limited early runs. Treat them as a
 guide, not a guarantee. A slower CPU or connection simply takes longer; nothing is
 wrong.</sub>
 
@@ -149,20 +152,22 @@ open (and your machine awake) and let it finish.
 
 Your secret entropy is generated in memory, used to transform the keys, and then
 **immediately zeroed**. It is never written to disk and never transmitted to the
-coordinator — only the resulting proving key (which reveals nothing about your secret)
+coordinator. Only the resulting proving key (which reveals nothing about your secret)
 is uploaded. This is the "toxic waste destroyed" step shown on the completion screen.
 
 ### Your receipt
 
-Each receipt records, for one circuit:
+Contributor-controlled receipt downloads contain only the fields below. They omit the
+participant identifier and coordinator timestamp.
 
 | Field | Meaning |
 | --- | --- |
 | `circuitId`, `contributionIndex` | Which circuit, and your position in its chain. |
-| `serverContributionHash` | **Your contribution hash `h_k`** — the Blake2b hash that the ceremony chain folds over and that appears inside the final proving key. This is the value you look for when verifying that your contribution was included. |
-| `contributionHash` | SHA-256 of the exact `.zkey` bytes you produced (a file integrity hash — distinct from `h_k`). |
+| `serverContributionHash` | **Your contribution hash `h_k`**: the Blake2b hash that the ceremony chain folds over and that appears inside the final proving key. This is the value you look for when verifying that your contribution was included. |
+| `contributionHash` | SHA-256 of the exact `.zkey` bytes you produced (a file integrity hash, distinct from `h_k`). |
 | `previousContributionHash` | The head hash `h_{k-1}` your contribution extended. |
 | `chainHash` | The running chain hash after your contribution: `SHA-256(previousChainHash ‖ h_k)`. |
+| `clientContributionHash` | Your browser-computed `h_k`. Included only in your owner receipt, not the public lookup or final transcript. |
 
 ### Attestation (optional)
 
@@ -171,7 +176,7 @@ record to a GitHub Gist on your own account, timestamped with your login. It con
 your circuit, index, and your own `h_k`.
 
 An attestation is **not a signature and not a vote.** It only lets *you* later point to
-a public, timestamped record that your contribution happened — useful for detecting if
+a public, timestamped record that your contribution happened, useful for detecting if
 your contribution were ever censored (your `h_k` would be absent from the final key).
 Because every `h_k` is public, anyone could publish a valid-looking attestation for
 someone else's contribution, so **a count of "N attestations" is not evidence of N
@@ -184,7 +189,7 @@ the open verifier below, not from attestations.
 
 **You do not have to trust this website.** Everything needed to independently verify the
 final parameters is published. This section is the runbook. All checks use
-[`snarkjs`](https://github.com/iden3/snarkjs) — the standard, widely-audited tool —
+[`snarkjs`](https://github.com/iden3/snarkjs) (the standard, widely-audited tool),
 so you never have to run code from this project to trust its output.
 
 ### What you need
@@ -200,20 +205,20 @@ so you never have to run code from this project to trust its output.
    - `https://ceremony.privacypools.com/genesis/<circuit>.genesis.zkey`
    - `https://ceremony.privacypools.com/genesis/init-transcript.json`
 3. **The circuit `.r1cs` files**, from the *audited* Privacy Pools V2 circuits release
-   (compile them yourself from the audited sources for maximum assurance — do not take
+   (compile them yourself from the audited sources for maximum assurance; do not take
    the r1cs from this app).
 4. **The Powers of Tau (`.ptau`) file** the ceremony was built on. It uses the Privacy &
    Scaling Explorations [Perpetual Powers of Tau](https://github.com/privacy-scaling-explorations/perpetualpowersoftau)
    `pot28_0080` file, sized per circuit (`ppot_0080_<NN>.ptau`, where `<NN>` is the
    smallest power of two that fits the circuit's constraints). `setup:ptau` downloads it
-   from the public PSE bucket; you can fetch the same file independently — its provenance
+   from the public PSE bucket; you can fetch the same file independently. Its provenance
    comes from the public PPoT ceremony, not from this deployment.
 
 > The `.r1cs` and `.ptau` are the trust roots that come from *outside* this deployment.
-> Getting them from the audited circuit release and the canonical PPoT — not from this
-> app — is what makes the verification independent.
+> Getting them from the audited circuit release and the canonical PPoT, not from this
+> app, is what makes the verification independent.
 
-### Step 1 — The genesis is the one that was announced
+### Step 1: The genesis is the one that was announced
 
 The whole chain is only meaningful if it started from the genuine genesis. Confirm the
 genesis key matches the hash **published externally at the start of the ceremony**
@@ -227,9 +232,9 @@ sha256sum deposit.genesis.zkey
 #  - init-transcript.json → circuits[].genesisZkeyHash
 ```
 
-If these disagree, stop — the chain was not rooted in the announced parameters.
+If these disagree, stop: the chain was not rooted in the announced parameters.
 
-### Step 2 — Each final key is a valid Phase-2 key for its circuit
+### Step 2: Each final key is a valid Phase-2 key for its circuit
 
 This is the core check. `snarkjs zkey verify` recomputes the entire Phase-2 chain from
 the Powers of Tau through every contribution and the final beacon, and confirms the
@@ -240,10 +245,10 @@ snarkjs zkey verify deposit.r1cs powersOfTau_final.ptau deposit.final.zkey
 # Expect: "ZKey Ok!"
 ```
 
-It also prints the Blake2b hash of **every** contribution in the chain and the beacon —
-keep this output for Step 4. Repeat for all 27 circuits.
+It also prints the Blake2b hash of **every** contribution in the chain and the beacon.
+Keep this output for Step 4. Repeat for all 27 circuits.
 
-### Step 3 — The beacon is public, unpredictable randomness
+### Step 3: The beacon is public, unpredictable randomness
 
 Finalization mixes in a beacon so that even if *every* contributor were malicious, the
 final key still depends on a value nobody could control. By default the beacon is the
@@ -265,12 +270,12 @@ curl -s https://ethereum-beacon-api.publicnode.com/eth/v2/beacon/blocks/<beaconS
 The same beacon value is embedded in each `*.final.zkey` and printed by the Step 2
 `zkey verify` output, so you can confirm the published beacon is the one actually
 applied. For the strongest guarantee, the operator announces the target slot number
-*before* it is produced — check that announcement against `beaconSlot`.
+*before* it is produced. Check that announcement against `beaconSlot`.
 
-### Step 4 — Your contribution is included
+### Step 4: Your contribution is included
 
-Find your own `h_k` — the `serverContributionHash` from your receipt (or the `h_k` in
-your attestation Gist) — in the list of contribution hashes printed by `zkey verify` in
+Find your own `h_k` (the `serverContributionHash` from your receipt, or the `h_k` in
+your attestation Gist) in the list of contribution hashes printed by `zkey verify` in
 Step 2, or in the transcript:
 
 ```bash
@@ -281,7 +286,7 @@ Because Step 2 proved the chain is valid and Step 3 proved the final beacon is p
 randomness, your `h_k` appearing in the verified chain means your randomness is
 permanently part of the final key.
 
-### Step 5 — The verification key matches the final key (optional)
+### Step 5: The verification key matches the final key (optional)
 
 dApps embed the small `*.vkey.json`, not the large `.final.zkey`. Confirm the published
 verification key is the one derived from the verified proving key:
@@ -291,7 +296,7 @@ snarkjs zkey export verificationkey deposit.final.zkey vkey_check.json
 diff <(jq -S . vkey_check.json) <(jq -S . deposit.vkey.json)   # expect no differences
 ```
 
-### Step 6 — The recorded chain is self-consistent (optional)
+### Step 6: The recorded chain is self-consistent (optional)
 
 You can independently recompute the chain hash from the receipts. Starting from
 `chainHash₀ = 0x000…0` (32 zero bytes), for each contribution in order:
@@ -302,14 +307,17 @@ chainHashₖ = SHA-256( chainHashₖ₋₁  ‖  h_k )        # raw bytes, not t
 
 The result after the last contribution must equal the circuit's `finalChainHash` in
 `transcript.json`. This ties the published transcript to the same `h_k` values you
-verified inside the final key.
+verified inside the final key. Transcript receipts contain the circuit, index,
+contribution hashes, predecessor hash, and chain hash, but no participant identifier,
+timestamp, or client hash.
 
 ### Quick check: verify a single receipt in the app
 
 If you just want to confirm a receipt is recorded by the coordinator (a convenience
 check, **not** a substitute for the independent verification above), use the **Verify**
 screen on the ceremony site and paste the receipt JSON. It confirms the receipt's hash
-matches the coordinator's record — it does not re-derive anything cryptographically.
+matches the coordinator's record; it does not re-derive anything cryptographically.
+Receipt checks require the circuit ID, contribution index, and contribution hash.
 
 ---
 
@@ -319,8 +327,8 @@ Finalization writes to `public/finalize/` (served at the site's web root):
 
 | File | Contents |
 | --- | --- |
-| `transcript.json` | Full ceremony record: beacon (hash, source, slot), and per circuit the `totalContributions`, `finalChainHash`, `finalContributionHash` (the beacon's hash), `finalZkeyHash`, and `verificationKey`; plus every contribution `receipt`. |
-| `<circuit>.vkey.json` | Groth16 verification key — embed this in verifiers/dApps. |
+| `transcript.json` | Public ceremony record: beacon (hash, source, slot), and per circuit the `totalContributions`, `finalChainHash`, `finalContributionHash` (the beacon's hash), `finalZkeyHash`, and `verificationKey`; plus identity-redacted public receipts for every contribution. |
+| `<circuit>.vkey.json` | Groth16 verification key. Embed this in verifiers/dApps. |
 | `<circuit>.final.zkey` | Finalized proving key. |
 
 Initialization writes to `public/genesis/`:
@@ -361,8 +369,8 @@ This reads each circuit's constraint count, downloads the correct
 file, and updates `ceremony.config.ts` with the actual constraint values.
 
 > **Note:** if the circuit artifacts path was skipped during scaffolding,
-> `ceremony.config.ts` may have empty `circuits`/`tiers` arrays. Populate them manually
-> — see [Configuration](#configuration).
+> `ceremony.config.ts` may have empty `circuits`/`tiers` arrays. Populate them manually;
+> see [Configuration](#configuration).
 
 ### 3. Configure environment variables
 
@@ -417,6 +425,21 @@ vercel --prod
 
 Add all environment variables in the Vercel dashboard under **Settings → Environment
 Variables**, and set `NEXTAUTH_URL` to your production domain.
+
+### Committed zkey privacy rollout
+
+New accepted contributions rotate each circuit onto an opaque, UUID-only committed
+zkey URL through the normal verified and atomic contribution flow. Existing zkeys are
+not migrated: previously disclosed identities cannot be undisclosed, and rewriting live
+storage directly would bypass the ceremony's continuity and commit protections.
+
+Near ceremony close, the designated maintainer monitors any circuits still serving an
+older identity-bearing URL. If such a circuit is still active and that maintainer is
+eligible, they may rotate it by contributing through the normal supported flow. If the
+circuit is closed, full, or no designated maintainer is eligible, leave it untouched;
+any later archival or migration needs its own reviewed procedure after the published
+final artifacts have been independently verified. Never copy zkeys, mutate KV or Blob
+pointers, or delete live objects manually.
 
 ### Keep Vercel Fluid Compute OFF
 
@@ -477,7 +500,7 @@ re-rolled by re-running.
 
 #### Pin the genesis hash externally
 
-`init:ceremony` records each circuit's genesis hash — as `genesisZkeyHash` in
+`init:ceremony` records each circuit's genesis hash, as `genesisZkeyHash` in
 `init-transcript.json` and as `initialZkeyHash` in KV. `finalize:ceremony` checks the
 genesis blob against that hash before verifying the chain, which catches a swapped or
 corrupted genesis blob while KV is intact.
@@ -485,7 +508,7 @@ corrupted genesis blob while KV is intact.
 It does **not** defend against an attacker who can write both the blob and KV: they
 would rewrite the pinned hash to match a swapped genesis. To close that gap, **publish
 each `genesisZkeyHash` somewhere outside this deployment's control at the start of the
-ceremony** — commit it to a public Git repo, post it where contributors can read it.
+ceremony**: commit it to a public Git repo, post it where contributors can read it.
 Contributors and auditors can then confirm (Step 1 above) that the finalized parameters
 were built on the genesis announced at the start, not one substituted later.
 
@@ -494,22 +517,22 @@ were built on the genesis announced at the start, not one substituted later.
 ## Agent / headless contributions
 
 An autonomous agent (e.g. `codex`) can contribute **headlessly** (no browser UI),
-using the OS CSPRNG for randomness (`node:crypto.randomBytes` — the
+using the OS CSPRNG for randomness (`node:crypto.randomBytes`, the
 `/dev/urandom` / `getentropy` / `BCryptGenRandom` equivalent, never mouse). The
-landing page has a **FOR AGENTS** button linking to [`/llms.txt`](public/llms.txt)
-— a machine-readable runbook the agent follows.
+landing page has a **FOR AGENTS** button linking to [`/llms.txt`](public/llms.txt),
+a machine-readable runbook the agent follows.
 
 The agent gets a Caburé Bearer JWT one of two ways, then runs `npx
 @wonderland/cabure-cli contribute <url> --token <jwt>`:
 
-- **GitHub (recommended, default)** — the existing CLI device flow
+- **GitHub (recommended, default)**: the existing CLI device flow
   (`POST/GET /api/ceremony/auth/cli`). Keeps a real GitHub identity on the
   contribution; a human authorizes a code once. Works out of the box (requires
   "Enable Device Flow" on the GitHub OAuth App).
-- **Generated keypair (opt-in, fully autonomous)** — `POST /api/ceremony/auth/wallet`:
+- **Generated keypair (opt-in, fully autonomous)** (`POST /api/ceremony/auth/wallet`):
   the agent signs a challenge with an Ed25519 key it generates and gets a JWT
   under an anonymous `agent:<fp>` identity, no human. **Enable with
-  `ALLOW_AGENT_AUTH=1`** (404 otherwise). Deliberately not sybil-resistant —
+  `ALLOW_AGENT_AUTH=1`** (404 otherwise). Deliberately not sybil-resistant:
   acceptable for a Phase-2 setup where extra participants only add entropy.
 
 Wallet self-test: `pnpm exec tsx scripts/agent-auth-selftest.ts`.
@@ -555,7 +578,7 @@ tiers: [
   {
     id: "core",                          // one of: "core" | "popular" | "all"
     label: "Core circuits",
-    description: "Fast contribution — essential circuits only",
+    description: "Fast contribution, essential circuits only",
     estimatedMinutes: 5,
     circuitIds: ["deposit", "ragequit"],
   },
@@ -579,7 +602,7 @@ tiers: [
 - **Rooted in a pinned, externally-announced genesis.** The chain can be proven to
   extend the genesis parameters that were published at the start (Step 1).
 - **Server-side verification of every contribution**, and a full chain re-verification
-  from the genesis at finalization — including a re-walk that matches the final key's
+  from the genesis at finalization, including a re-walk that matches the final key's
   embedded contribution hashes against the recorded receipts, so a key swapped via a
   leaked storage token (but no KV access) is rejected.
 - **A public, unpredictable beacon** (Ethereum RANDAO) is applied last, so the result

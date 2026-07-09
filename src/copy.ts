@@ -17,7 +17,7 @@ export const defaultCopy: CeremonyCopy = {
     title: "Privacy Pools V2",
     subtitle: "Trusted Setup Ceremony",
     description:
-      "Contribute your randomness to the Privacy Pools V2 trusted setup. Your contribution strengthens the ceremony — only one honest participant is needed.",
+      "Contribute your randomness to the Privacy Pools V2 trusted setup. Your contribution strengthens the ceremony. Only one honest participant is needed.",
     stats: {
       contributionsLabel: "Contributors",
       circuitsLabel: "Circuits",
@@ -37,14 +37,14 @@ export const defaultCopy: CeremonyCopy = {
       "This GitHub account has contributed to every available circuit. You can still verify your receipts.",
     closedSubtitle: "Contributions are closed",
     closedDescription:
-      "The ceremony has reached its target and is no longer accepting contributions. It is now being finalized — the final parameters and verification beacon are being prepared. You can verify existing receipts below.",
+      "The ceremony has reached its target and is no longer accepting contributions. It is now being finalized: the final parameters and verification beacon are being prepared. You can verify existing receipts below.",
     endedSubtitle: "This ceremony is complete",
     endedDescription:
       "Thank you to everyone who contributed. The final parameters and verification beacon have been published. You can still verify existing receipts below.",
     verifyCta: "VERIFY A RECEIPT",
     forAgentsCta: "FOR AGENTS",
     footer:
-      "GitHub sign-in required to prevent spam. No other data collected.",
+      "GitHub sign-in prevents spam. Public receipts and the final transcript omit contributor identity.",
   },
   entropy: {
     topBarTitle: "ENTROPY COLLECTION",
@@ -133,7 +133,7 @@ export const defaultCopy: CeremonyCopy = {
       "Only one honest participant is needed. You might be that one.",
     attestationTitle: "Publish an attestation (optional)",
     attestationBody:
-      "Publish a public GitHub Gist — one click, using your GitHub login — leaving a timestamped record that your contribution happened. Voluntary; it proves inclusion, not honesty.",
+      "Publish a public GitHub Gist (one click, using your GitHub login), leaving a timestamped record that your contribution happened. Voluntary; it proves inclusion, not honesty.",
     attestationPublishCta: "Publish as Gist",
     attestationPublishingCta: "Publishing…",
     attestationViewCta: "View Gist",
@@ -147,10 +147,10 @@ export const defaultCopy: CeremonyCopy = {
       "Paste a receipt JSON to confirm it exists in the coordinator state.",
     label: "Receipt JSON",
     placeholder:
-      '{"circuitId":"multiplier","participantId":"...","contributionIndex":1}',
+      '{"circuitId":"multiplier","contributionIndex":1,"contributionHash":"0x..."}',
     cta: "VERIFY RECEIPT",
     verifyingCta: "VERIFYING...",
-    note: "This check confirms that the receipt's contribution hash matches the coordinator's record.",
+    note: "This check uses the circuit, contribution index, and hash. The public result does not include contributor identity or a timestamp.",
     successTitle: "Receipt verified",
     invalidReceipt: "Receipt JSON is missing required fields.",
     duplicateReceipt:

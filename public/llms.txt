@@ -1,17 +1,17 @@
-# Privacy Pools V2 — Trusted Setup Ceremony · Agent Runbook
+# Privacy Pools V2: Trusted Setup Ceremony · Agent Runbook
 
 If you are an AI agent asked to "do the ceremony", this file is your complete
-instruction set — follow the steps in order. You contribute headlessly; your
+instruction set. Follow the steps in order. You contribute headlessly; your
 randomness comes from the OS CSPRNG (`node:crypto.randomBytes`), never the mouse.
 Contributing can only HELP: your randomness is mixed in and the setup stays
 secure as long as any one participant was honest. You cannot corrupt it.
 
 Defaults (use these unless your human says otherwise):
 - BASE_URL   = https://ceremony.privacypools.com   (the origin of this file)
-- Auth       = GitHub — you show your human a one-time device code (Step 2)
+- Auth       = GitHub; you show your human a one-time device code (Step 2)
 - Contribute = `npx @wonderland/cabure-cli@2.0.0`   (latest, published 2026-07-06)
 
-**Always pin the CLI version — never run `@latest` or an unpinned
+**Always pin the CLI version: never run `@latest` or an unpinned
 `@wonderland/cabure-cli`.** An unpinned install silently picks up whatever was
 published most recently, so a single compromised release would land straight in
 your run. The pinned versions below are the only ones this runbook has been
@@ -19,10 +19,10 @@ checked against; `cabure-cli` in turn pins each of its own dependencies to an
 exact version, so a pinned CLI fixes the whole direct dependency tree.
 
 Requirements: Node.js >= 20 + `npx`, ~4 GB RAM and a few GB of disk. The compute
-runs locally and is slow — up to ~1 hour for the full circuit set.
+runs locally and is slow, up to ~1 hour for the full circuit set.
 
 --------------------------------------------------------------------------------
-## Step 1 — check the ceremony is open
+## Step 1: check the ceremony is open
 
 ```bash
 curl -s https://ceremony.privacypools.com/api/ceremony/status | head -c 400
@@ -31,10 +31,10 @@ curl -s https://ceremony.privacypools.com/api/ceremony/status | head -c 400
 If `isActive` is `false`, stop and tell your human the ceremony is closed.
 
 --------------------------------------------------------------------------------
-## Step 2 — authenticate with GitHub
+## Step 2: authenticate with GitHub
 
 Write `github-auth.mjs`, run it, and relay the printed code to your human. It
-runs the GitHub device flow (the server proxies it — no secrets) and prints a
+runs the GitHub device flow (the server proxies it, no secrets) and prints a
 Caburé Bearer JWT once your human authorizes.
 
 ```js
@@ -64,7 +64,7 @@ CABURE_TOKEN="$(node github-auth.mjs)"    # show your human the ACTION REQUIRED 
 ```
 
 --------------------------------------------------------------------------------
-## Step 3 — contribute
+## Step 3: contribute
 
 The CLI does the whole flow per circuit: queue → download + hash-verify the
 zkey → draw 64 bytes from the OS CSPRNG → `zKey.contribute()` → upload → submit.
@@ -76,10 +76,10 @@ npx --yes @wonderland/cabure-cli@2.0.0 contribute https://ceremony.privacypools.
 ```
 
 **If `2.0.0` fails to start** with a module-load error like `Dynamic require of
-"url" is not supported` (a known packaging bug in the v2 crypto build — 2.0.0
+"url" is not supported` (a known packaging bug in the v2 crypto build: 2.0.0
 pins `@wonderland/cabure-crypto@2.0.0`, whose ESM bundle dynamically requires
 `url`/`vm`/`worker_threads` with no `createRequire` shim), fall back to the last
-known-good version `1.0.0` under Node 20 — it talks to the same server and its
+known-good version `1.0.0` under Node 20: it talks to the same server and its
 contributions are server-verified just the same:
 
 ```bash
@@ -88,22 +88,22 @@ npx --yes -p node@20 -p @wonderland/cabure-cli@1.0.0 \
   --token "$CABURE_TOKEN" 2>&1 | tee cabure-progress.log
 ```
 
-> **IMPORTANT — on the v1 fallback: keep your queue slot alive, and go ONE CIRCUIT AT A TIME.**
-> v1 never refreshes its queue slot — not while waiting in line, not during a long
-> compute — but the server drops any slot that isn't re-POSTed within 5 minutes.
+> **IMPORTANT, on the v1 fallback: keep your queue slot alive, and go ONE CIRCUIT AT A TIME.**
+> v1 never refreshes its queue slot (not while waiting in line, not during a long
+> compute), but the server drops any slot that isn't re-POSTed within 5 minutes.
 > Two symptoms follow, and NEITHER means the ceremony is broken:
-> - On a **busy queue** you get `Not in queue` before you ever reach the front —
+> - On a **busy queue** you get `Not in queue` before you ever reach the front:
 >   your slot expired while you waited behind others (deposit alone can be 20+ deep).
 > - On a **long compute** (`transact_5x*`) you get `Not at front of the queue` on
->   submit, or the run stalls for minutes with your id stuck as the circuit's
->   `currentParticipant`.
+>   submit, or the run stalls for minutes while the circuit remains marked
+>   `currentParticipant: "active"`.
 >
-> **Do not wait it out — it won't self-clear.** Fix it by running a tiny background
+> **Do not wait it out. It won't self-clear.** Fix it by running a tiny background
 > heartbeat that re-POSTs your slot every 90s for the ONE circuit you're on, and
 > contributing circuits one at a time. Save this as `queue-heartbeat.mjs`:
 >
 > ```js
-> // queue-heartbeat.mjs <circuitId> — keeps your v1 queue slot alive while you wait + compute.
+> // queue-heartbeat.mjs <circuitId>: keeps your v1 queue slot alive while you wait + compute.
 > const BASE = process.env.BASE_URL || "https://ceremony.privacypools.com";
 > const token = process.env.CABURE_TOKEN;
 > const circuit = process.argv[2];
@@ -141,34 +141,34 @@ npx --yes -p node@20 -p @wonderland/cabure-cli@1.0.0 \
 > done
 > ```
 >
-> Re-running is safe — the server skips circuits you've already completed, so a
+> Re-running is safe: the server skips circuits you've already completed, so a
 > retry only redoes the pending one. The front slot also has a per-circuit hold
 > cap (~4 min for deposit up to ~15 min for the 5x* circuits); with the heartbeat
 > running and the CLI actively computing/uploading you finish well inside it. (This
-> whole dance is v1-only — the browser flow and a fixed v2 CLI refresh the slot
+> whole dance is v1-only: the browser flow and a fixed v2 CLI refresh the slot
 > automatically.)
 
-It prints a line per phase — `Queue`, `Download`, `Entropy`, `Contributing`,
+It prints a line per phase: `Queue`, `Download`, `Entropy`, `Contributing`,
 `Upload`, `Submit`. Report each circuit as it finishes; never abort a
-`Contributing` step (that's the slow zk compute — let it run). Watch from another
+`Contributing` step (that's the slow zk compute, let it run). Watch from another
 shell with `tail -f cabure-progress.log`.
 
 For a quick end-to-end check before committing the full ~1 hour, add
 `--circuit deposit` (the smallest circuit) to do just one contribution.
 
 --------------------------------------------------------------------------------
-## Step 4 — confirm
+## Step 4: confirm
 
-On success the CLI prints a receipt per circuit (participant id, contribution
-index, contribution hash, chain hash). Save it — it's your public proof of
-inclusion. Verify any receipt:
+On success the CLI prints a receipt per circuit. Save it as your proof of
+inclusion. Verify it by circuit, index, and contribution hash; the public
+response omits participant identity and timestamps:
 
 ```bash
-curl -s "https://ceremony.privacypools.com/api/ceremony/receipt?circuitId=deposit&participantId=<yourId>&contributionIndex=<n>" | head -c 400
+curl -s "https://ceremony.privacypools.com/api/ceremony/receipt?circuitId=deposit&contributionIndex=<n>&contributionHash=0x<64-hex-characters>" | head -c 400
 ```
 
 --------------------------------------------------------------------------------
-## Alternative — fully autonomous (no human, no GitHub)
+## Alternative: fully autonomous (no human, no GitHub)
 
 Only if there is no human to authorize the Step-2 code AND the operator enabled
 it (`ALLOW_AGENT_AUTH=1`): sign a challenge with a keypair you generate to get a
@@ -198,7 +198,7 @@ console.log(out.token);
 ## Notes
 
 - Entropy is the OS CSPRNG only; nothing reads mouse/keyboard.
-- Toxic waste: the CLI never persists the secret it derives — it lives only in
+- Toxic waste: the CLI never persists the secret it derives; it lives only in
   memory during `Contributing`.
 - You can only contribute once per circuit; re-running skips ones you've done.
 - Attestation via GitHub Gist is browser-only; your receipt (Step 4) is the
