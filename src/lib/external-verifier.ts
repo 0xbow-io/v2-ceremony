@@ -22,11 +22,27 @@ export interface VerifyRemoteRequest {
   ptauUrl: string;
   genesisUrl: string;
   genesisSha256: string;
+  // The coordinator-owned committed copy (already promoted via a server-side blob
+  // copy). The client cannot overwrite it, so the bytes the worker verifies are
+  // exactly the bytes that will be committed — no per-attempt hash pin needed.
   zkeyUrl: string;
-  // Load-bearing: sha256 of the exact bytes the route will commit. The worker
-  // MUST refuse to verify any zkey whose bytes don't hash to this, so it can
-  // never return a valid verdict for bytes other than the committed ones.
+  // Upper bound on the embedded contribution count (headCount + 1). The worker
+  // rejects a forged larger count before walking the MPC section.
+  maxContributions: number;
+}
+
+// The worker's verdict plus the MPC view it read from the committed zkey, so the
+// route can run the continuity gate and record the receipt without ever loading
+// the bytes itself. Metadata fields are present iff valid === true.
+export interface RemoteVerifyResult {
+  valid: boolean;
   zkeySha256: string;
+  csHash: string;
+  count: number;
+  // h_k of the last (new-head) contribution; null only for an empty chain.
+  headHash: string | null;
+  // h_{k-1}: hash of the entry at count-2; null when count < 2.
+  linkHash: string | null;
 }
 
 // Under the 300s function budget after the route has already spent time on the
@@ -71,11 +87,14 @@ function getImpersonatedClient(): Impersonated | null {
   return impersonatedClient;
 }
 
-// Returns the worker's boolean verdict for a valid HTTP 200 {valid} response.
-// Throws on any failure to obtain a verdict (non-200, malformed body, timeout,
-// network error, token-minting failure) so the route's existing catch maps it
-// to a non-consuming 503, exactly like an in-process verifier crash.
-export async function verifyRemote(req: VerifyRemoteRequest): Promise<boolean> {
+// Returns the worker's verdict (and, when valid, the MPC view it read) for a
+// valid HTTP 200 response. Throws on any failure to obtain a verdict (non-200,
+// malformed body, timeout, network error, token-minting failure) so the route's
+// existing catch maps it to a non-consuming 503, exactly like an in-process
+// verifier crash.
+export async function verifyRemote(
+  req: VerifyRemoteRequest,
+): Promise<RemoteVerifyResult> {
   const baseUrl = req.url.replace(/\/$/, "");
 
   const headers: Record<string, string> = {
@@ -98,7 +117,7 @@ export async function verifyRemote(req: VerifyRemoteRequest): Promise<boolean> {
       genesisUrl: req.genesisUrl,
       genesisSha256: req.genesisSha256,
       zkeyUrl: req.zkeyUrl,
-      zkeySha256: req.zkeySha256,
+      maxContributions: req.maxContributions,
     }),
     signal: AbortSignal.timeout(REMOTE_VERIFY_TIMEOUT_MS),
   });
@@ -107,9 +126,44 @@ export async function verifyRemote(req: VerifyRemoteRequest): Promise<boolean> {
     throw new Error(`verifier returned HTTP ${response.status}`);
   }
 
-  const data = (await response.json()) as { valid?: unknown };
+  const data = (await response.json()) as Record<string, unknown>;
   if (typeof data.valid !== "boolean") {
     throw new Error("verifier returned a malformed response (no boolean valid)");
   }
-  return data.valid;
+  if (!data.valid) {
+    return {
+      valid: false,
+      zkeySha256: "",
+      csHash: "",
+      count: 0,
+      headHash: null,
+      linkHash: null,
+    };
+  }
+
+  // valid === true: the MPC view the route needs for continuity + the receipt
+  // MUST be present and well-typed, else we cannot commit — treat a malformed
+  // success like an infra fault (throw → route 503) rather than committing junk.
+  const { zkeySha256, csHash, count, headHash, linkHash } = data;
+  if (
+    typeof zkeySha256 !== "string" ||
+    typeof csHash !== "string" ||
+    typeof count !== "number" ||
+    !Number.isInteger(count) ||
+    (headHash !== null && typeof headHash !== "string") ||
+    (linkHash !== null && typeof linkHash !== "string")
+  ) {
+    throw new Error(
+      "verifier returned a malformed valid response (missing MPC fields)",
+    );
+  }
+
+  return {
+    valid: true,
+    zkeySha256,
+    csHash,
+    count,
+    headHash: headHash ?? null,
+    linkHash: linkHash ?? null,
+  };
 }

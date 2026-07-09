@@ -23,7 +23,7 @@ import { createRequire } from "node:module";
 // Load the package's CJS build via the "require" export condition instead —
 // Node's native require() supports the dynamic require the bundle needs.
 const require = createRequire(import.meta.url);
-const { verifyChain } = require("@wonderland/cabure-crypto");
+const { verifyChain, parseMpcParams } = require("@wonderland/cabure-crypto");
 
 // snarkjs (via fastfile) leaves file handles for the GC to close; on recent Node
 // a GC-closed FileHandle throws an uncaught async ERR_INVALID_STATE that would
@@ -146,21 +146,34 @@ async function handleVerify(req, res) {
     return json(res, 400, { error: "invalid JSON body" });
   }
 
-  const { ptauUrl, genesisUrl, genesisSha256, zkeyUrl, zkeySha256 } = params ?? {};
+  const { ptauUrl, genesisUrl, genesisSha256, zkeyUrl, zkeySha256, maxContributions } =
+    params ?? {};
   if (
     typeof ptauUrl !== "string" ||
     typeof genesisUrl !== "string" ||
     typeof genesisSha256 !== "string" ||
-    typeof zkeyUrl !== "string" ||
-    typeof zkeySha256 !== "string"
+    typeof zkeyUrl !== "string"
   ) {
     return json(res, 400, { error: "missing or malformed fields" });
+  }
+  // Legacy per-attempt hash pin: optional now. Newer callers promote the zkey
+  // into a coordinator-owned path and verify THAT copy, so the bytes verified
+  // are already the bytes committed and no pin is needed. When a caller does send
+  // one we still enforce it (below), so an old route + new worker stays safe.
+  if (zkeySha256 !== undefined && typeof zkeySha256 !== "string") {
+    return json(res, 400, { error: "malformed zkeySha256" });
+  }
+  // When present, the caller wants the MPC view back (csHash + head/link hashes)
+  // and this bounds the parse so a forged count is rejected before it is walked.
+  const wantMpc = maxContributions !== undefined;
+  if (wantMpc && (!Number.isInteger(maxContributions) || maxContributions < 0)) {
+    return json(res, 400, { error: "malformed maxContributions" });
   }
   if (![ptauUrl, genesisUrl, zkeyUrl].every(isAllowedUrl)) {
     return json(res, 400, { error: "url not allowed (must be a public Blob https URL)" });
   }
 
-  // Fetch inputs + enforce both sha256 pins. A pin mismatch is an infra/config
+  // Fetch inputs + enforce the genesis pin. A pin mismatch is an infra/config
   // fault (or a swapped blob), NOT an invalid chain -> throw -> 5xx -> route 503.
   const started = Date.now();
   let ptau, genesis, zkey;
@@ -176,11 +189,32 @@ async function handleVerify(req, res) {
   }
 
   const zkeyHash = sha256Hex(zkey);
-  if (zkeyHash !== zkeySha256) {
-    // The bytes at zkeyUrl are not the bytes the route will commit. Refuse —
-    // never verify anything other than the pinned bytes.
+  if (zkeySha256 !== undefined && zkeyHash !== zkeySha256) {
+    // Legacy pin path: the bytes at zkeyUrl are not the pinned bytes. Refuse.
     console.error(`[verifier] zkey hash mismatch: got ${zkeyHash}, expected ${zkeySha256}`);
     return json(res, 422, { error: "zkey does not match the pinned hash" });
+  }
+
+  // Read the MPC section (snarkjs zkey section 10) BEFORE the expensive verify:
+  // a malformed zkey or a forged contribution count is a definitive bad
+  // submission, so report it invalid without paying for pairings. Cheap
+  // (bounds-checked reads + at most two Blake2b hashes, no pairings). Only when
+  // the caller asked for it (maxContributions present).
+  let mpcView = null;
+  if (wantMpc) {
+    try {
+      const mpc = await parseMpcParams(zkey, { maxContributions });
+      const count = mpc.contributions.length;
+      mpcView = {
+        csHash: mpc.csHash,
+        count,
+        headHash: count >= 1 ? mpc.contributions[count - 1].hash() : null,
+        linkHash: count >= 2 ? mpc.contributions[count - 2].hash() : null,
+      };
+    } catch (error) {
+      console.warn(`[verifier] mpc parse rejected: ${error?.message}`);
+      return json(res, 200, { valid: false });
+    }
   }
 
   // verifyChain swallows internal throws and returns false. A false here is
@@ -198,7 +232,10 @@ async function handleVerify(req, res) {
   console.log(
     `[verifier] verify done valid=${valid} ms=${Date.now() - started} zkeyBytes=${zkey.length}`,
   );
-  return json(res, 200, { valid });
+  if (!valid) return json(res, 200, { valid: false });
+  // Return the sha256 (so the route can record it without re-hashing) and, when
+  // requested, the MPC view the route's continuity gate needs.
+  return json(res, 200, { valid: true, zkeySha256: zkeyHash, ...(mpcView ?? {}) });
 }
 
 const server = createServer((req, res) => {

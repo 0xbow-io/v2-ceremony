@@ -8,7 +8,7 @@ import {
 } from "@wonderland/cabure-crypto";
 
 import "@/lib/snarkjs-gc-guard";
-import { getCeremonyConfig, type CeremonyConfig } from "@/lib/ceremony-config";
+import { getCeremonyConfig } from "@/lib/ceremony-config";
 import { verifyRemote } from "@/lib/external-verifier";
 import { loadPtau } from "@/lib/ptau-loader";
 import { getParticipant } from "@/lib/participant-auth";
@@ -26,7 +26,7 @@ import {
   type ContributionReceipt,
   type ManifestState,
 } from "@/lib/ceremony-state";
-import { deleteBinary, putBinary } from "@/lib/blob-store";
+import { copyBinary, deleteBinary, putBinary } from "@/lib/blob-store";
 import {
   acquireLock,
   releaseLock,
@@ -52,32 +52,62 @@ const BLOB_HOST_SUFFIX = ".public.blob.vercel-storage.com";
 // locking the participant out indefinitely.
 const VERIFY_SLOT_TTL_SECONDS = 300;
 
+// Normalized, byte-free view of a candidate contribution's MPC section (snarkjs
+// zkey section 10). Both paths produce this — the offload path from the worker's
+// response, the in-process fallback from a local parse — so the continuity gate
+// and the commit never touch the zkey bytes.
+interface ContributionMpc {
+  // sha256 of the exact committed bytes: the download-integrity hash stored in
+  // the receipt and re-checked by the client against its own upload.
+  computedHash: string;
+  // Circuit identity (csHash), constant across the whole chain.
+  csHash: string;
+  // Number of contributions embedded in this zkey.
+  count: number;
+  // h_k of the last (new-head) contribution. Null only for an empty chain
+  // (count 0), which the continuity gate always rejects.
+  headHash: string | null;
+  // h_{k-1}: hash of the entry at the head position this builds on
+  // (contributions[count - 2]). Null when count < 2.
+  linkHash: string | null;
+}
+
+// A verified contribution ready to commit: its MPC view plus the coordinator-
+// owned blob it now lives at.
+interface VerifiedContribution extends ContributionMpc {
+  storedUrl: string;
+  storedPathname: string;
+}
+
 // C-1 continuity check: the upload must extend the recorded head by exactly one,
-// judged only from server-side KV state. verifyChain proves a zkey is valid from
-// the genesis, not that it extends the head — this is what stops a front-of-queue
-// contributor rebasing onto the genesis and dropping prior work. Returns an error
-// message, or null if it extends the head.
-function checkContinuity(circuit: CircuitState, mpc: MpcParams): string | null {
+// judged only from server-side KV state and the (already-computed) MPC view.
+// verifyChain proves a zkey is valid from the genesis, not that it extends the
+// head — this is what stops a front-of-queue contributor rebasing onto the
+// genesis and dropping prior work. Returns an error message, or null if it
+// extends the head.
+function checkContinuity(
+  circuit: CircuitState,
+  mpc: Pick<ContributionMpc, "csHash" | "count" | "linkHash">,
+): string | null {
   const headCount = circuit.totalContributions;
-  const count = mpc.contributions.length;
-  if (count !== headCount + 1) {
+  if (mpc.count !== headCount + 1) {
     return "Contribution does not extend the current head: wrong contribution count.";
   }
   // Circuit identity is pinned for every submission, not just the first: the
   // csHash is constant across the whole chain, so a mismatch means a wrong or
-  // corrupted upload — reject it here, cheaply, before the verify.
+  // corrupted upload.
   if (mpc.csHash !== circuit.csHash) {
     return "Contribution is for the wrong circuit: csHash mismatch.";
   }
   // Empty chain: there is no head to link to, so the csHash check above is the
-  // whole gate. No underflow on headCount - 1.
+  // whole gate.
   if (headCount === 0) {
     return null;
   }
-  // The entry at the head position must hash to the recorded head. This ties
-  // the upload to the exact chain the coordinator advanced.
-  const linkHash = mpc.contributions[headCount - 1].hash();
-  if (linkHash !== circuit.headContributionHash) {
+  // count === headCount + 1 here, so linkHash is the hash of
+  // contributions[headCount - 1] — the entry that must hash to the recorded
+  // head. This ties the upload to the exact chain the coordinator advanced.
+  if (mpc.linkHash !== circuit.headContributionHash) {
     return "Contribution does not build on the current head: head hash mismatch.";
   }
   return null;
@@ -87,21 +117,21 @@ type ContinuityGateResult =
   | { ok: true; serverContributionHash: string }
   | { ok: false; response: NextResponse };
 
-// Authoritative C-1 continuity gate, run inside the per-circuit lock: parse the
-// upload, require it to extend the head, and on success return the new head's
-// hash. Any rejection consumes the front-of-queue turn (shifts queue[0]) so the
-// participant cannot replay garbage to block the queue. Mutates circuit.queue on
-// rejection; run before the accept-path mutations.
+// Authoritative C-1 continuity gate, run inside the per-circuit lock: require the
+// contribution to extend the recorded head by exactly one, judged only from KV
+// state and the already-computed MPC view (no zkey bytes, no re-parse — the MPC
+// view is a pure function of the bytes, so it is computed once, before the lock).
+// Any rejection consumes the front-of-queue turn (shifts queue[0]) so a
+// participant cannot replay a non-extending upload to block the queue. Mutates
+// circuit.queue on rejection; run before the accept-path mutations.
 async function runContinuityGate(opts: {
   circuit: CircuitState;
-  body: Uint8Array;
-  storedUrl: string;
+  contribution: VerifiedContribution;
   lockKey: string;
   lockToken: string;
   circuitStateKey: string;
 }): Promise<ContinuityGateResult> {
-  const { circuit, body, storedUrl, lockKey, lockToken, circuitStateKey } =
-    opts;
+  const { circuit, contribution, lockKey, lockToken, circuitStateKey } = opts;
 
   const rejectAndConsumeTurn = async (
     error: string,
@@ -114,7 +144,7 @@ async function runContinuityGate(opts: {
       circuitStateKey,
       circuitState: circuit,
     });
-    await deleteBinary(storedUrl).catch(() => {});
+    await deleteBinary(contribution.storedUrl).catch(() => {});
     // If the fenced write did not land, the lock was lost — the turn was not
     // actually consumed. Report a retry instead of the original rejection, so
     // the response does not imply a turn-consuming outcome that did not happen.
@@ -130,76 +160,16 @@ async function runContinuityGate(opts: {
     return { ok: false, response: NextResponse.json({ error }, { status }) };
   };
 
-  // Cap the contribution count at the head count + 1 so a forged file claiming
-  // a huge count is rejected before the parser walks it.
-  let mpc: MpcParams;
-  try {
-    mpc = await parseMpcParams(body, {
-      maxContributions: circuit.totalContributions + 1,
-    });
-  } catch {
-    return rejectAndConsumeTurn(
-      "Contribution is not a parseable zkey for this circuit.",
-      400,
-    );
-  }
-
-  const continuityError = checkContinuity(circuit, mpc);
+  const continuityError = checkContinuity(circuit, contribution);
   if (continuityError) {
     return rejectAndConsumeTurn(continuityError, 409);
   }
-
-  // The new head's hash, recomputed by the server from the uploaded bytes.
-  return {
-    ok: true,
-    serverContributionHash:
-      mpc.contributions[mpc.contributions.length - 1].hash(),
-  };
-}
-
-// Consume the front-of-queue turn for a submission that failed a pre-lock check,
-// so it cannot be replayed to block the queue or force repeated verifies. Briefly
-// takes the per-circuit lock and shifts the participant off if they are still at
-// the front. Best-effort and NEVER throws: a missed lock or a KV error just skips
-// the shift (the gate still guards the commit; queue timeout still bounds grief),
-// so a caller's 4xx is never turned into a 500 and its blob cleanup still runs.
-// Takes its own lock; do not call while holding it.
-async function consumeTurn(
-  config: CeremonyConfig,
-  id: string,
-  participantId: string,
-): Promise<void> {
-  const lockKey = `${config.storage.manifestPath}:lock:${id}`;
-  const lockToken = crypto.randomUUID();
-  try {
-    if (!(await acquireLock(lockKey, lockToken))) return;
-    try {
-      const circuit = await getCircuitState(id);
-      if (circuit.queue[0]?.participantId === participantId) {
-        circuit.queue.shift();
-        const consumed = await writeCircuitStateFenced({
-          lockKey,
-          lockToken,
-          circuitStateKey: kvKey(config.storage.circuitStatePrefix, id),
-          circuitState: circuit,
-        });
-        // Best-effort: a false here means our lock lapsed mid-shift (a 60s+
-        // stall across one read + an in-memory shift — near-impossible), so the
-        // turn was not consumed. Nothing to recover; log it so the rare skip is
-        // not silent. The gate still guards the commit; queue timeout bounds grief.
-        if (!consumed) {
-          console.warn(
-            "consumeTurn: lock lost, turn not consumed for circuit:",
-            id,
-          );
-        }
-      }
-    } finally {
-      await releaseLock(lockKey, lockToken).catch(() => {});
-    }
-  } catch (error) {
-    console.error("Failed to consume turn for circuit:", id, error);
+  // count === headCount + 1 >= 1 once continuity passes, so headHash is always
+  // set; guard defensively rather than ever commit a null head.
+  if (contribution.headHash === null) {
+    return rejectAndConsumeTurn("Contribution has no head hash.", 409);
   }
+  return { ok: true, serverContributionHash: contribution.headHash };
 }
 
 function isValidPendingBlobUrl(url: string, circuitId: string): boolean {
@@ -341,63 +311,24 @@ export async function POST(
     );
   }
 
-  const blobResponse = await fetch(blobUrl);
-  if (!blobResponse.ok) {
-    return NextResponse.json(
-      { error: "Failed to fetch uploaded zkey from blob storage" },
-      { status: 400 },
-    );
-  }
-  const body = new Uint8Array(await blobResponse.arrayBuffer());
-
-  if (body.length === 0) {
-    await deleteBinary(blobUrl).catch(() => {});
-    return NextResponse.json(
-      { error: "Contribution payload is empty" },
-      { status: 400 },
-    );
-  }
-
-  // Cheap continuity pre-filter (no pairings) before the expensive verify, so
-  // only a head-extending zkey reaches verifyChain. Safe on the pre-check
-  // snapshot: the head cannot advance under a front-of-queue participant, so it
-  // never false-rejects; the gate under the lock is still authoritative. A
-  // failure consumes the turn (same grief rule as the gate).
-  let preMpc: MpcParams;
-  try {
-    preMpc = await parseMpcParams(body, {
-      maxContributions: precheck.circuit.totalContributions + 1,
-    });
-  } catch {
-    await consumeTurn(config, id, participantId);
-    await deleteBinary(blobUrl).catch(() => {});
-    return NextResponse.json(
-      { error: "Contribution is not a parseable zkey for this circuit." },
-      { status: 400 },
-    );
-  }
-  // Reject now if the upload does not extend the head (count + link check),
-  // before paying for the verify; failing it consumes the turn.
-  const preContinuityError = checkContinuity(precheck.circuit, preMpc);
-  if (preContinuityError) {
-    await consumeTurn(config, id, participantId);
-    await deleteBinary(blobUrl).catch(() => {});
-    return NextResponse.json({ error: preContinuityError }, { status: 409 });
-  }
+  const mustVerify =
+    process.env.NODE_ENV === "production" || config.verifyContributions;
+  const externalVerifierUrl = process.env.CEREMONY_VERIFIER_URL?.trim();
+  // Bounds the MPC parse (offload: on the worker; fallback: here) so a forged
+  // file claiming a huge contribution count is rejected before it is walked. The
+  // head cannot advance under a front-of-queue participant, so this pre-check
+  // snapshot value is stable for the whole request.
+  const maxContributions = precheck.circuit.totalContributions + 1;
 
   // Single-flight: at most one in-flight verify per participant per circuit.
-  // The verify below is expensive (ptau download + pairings); without this a
-  // front-of-queue participant could fan out concurrent requests and force
-  // parallel verifies (resource and cost DoS). Released in the finally at the
-  // end of the request; the TTL frees it if the request dies mid-verify.
+  // The verify is expensive (ptau download + pairings, on the worker or here);
+  // without this a front-of-queue participant could fan out concurrent requests
+  // and force parallel verifies (resource and cost DoS). Released in the finally
+  // at the end of the request; the TTL frees it if the request dies mid-verify.
   const verifySlotKey = `${config.storage.manifestPath}:verifying:${id}:${participantId}`;
   const verifySlotToken = crypto.randomUUID();
   if (
-    !(await acquireLock(
-      verifySlotKey,
-      verifySlotToken,
-      VERIFY_SLOT_TTL_SECONDS,
-    ))
+    !(await acquireLock(verifySlotKey, verifySlotToken, VERIFY_SLOT_TTL_SECONDS))
   ) {
     await deleteBinary(blobUrl).catch(() => {});
     return NextResponse.json(
@@ -410,77 +341,128 @@ export async function POST(
   }
 
   try {
-    // sha256 of the exact bytes we will commit (putBinary(zkeyPath, body)
-    // below). Doubles as the pin sent to the external verifier so it verifies
-    // precisely these bytes and nothing else.
-    const computedHash = `0x${createHash("sha256").update(body).digest("hex")}`;
+    // Unique committed path per attempt, never shared: once a contribution
+    // commits, currentZkeyUrl points here, and two concurrent attempts from the
+    // same participant must not clobber each other's blob. A rejected attempt
+    // deletes its own; only a crash leaks one, which the orphan-GC reclaims.
+    const zkeyPath = `${config.storage.zkeyPrefix}/${id}/pending-${participantId}-${crypto.randomUUID()}.zkey`;
 
-    // verifyChain re-walks the chain and rejects a poisoned contribution at
-    // submit time (deferring to finalize would be a late, unrecoverable DoS).
-    // It is per-contribution validity, not continuity — the gate handles that —
-    // and runs outside the commit lock: `body` is checked against the immutable
-    // pinned genesis, so concurrency cannot change the result. Mandatory on every
-    // deployment; the flag can only ADD it in dev/CI, never remove it. Expensive
-    // but DoS-bounded: the pre-filter lets only a head-extending zkey reach it,
-    // and the slot caps it to one verify per participant. When CEREMONY_VERIFIER_URL
-    // is set the verify runs on an external worker instead of in-process (identical
-    // 400/503 semantics); unset it to fall straight back to in-process verify.
+    let contribution: VerifiedContribution;
 
-    const mustVerify =
-      process.env.NODE_ENV === "production" || config.verifyContributions;
-    if (mustVerify) {
-      const externalVerifierUrl = process.env.CEREMONY_VERIFIER_URL?.trim();
-      if (externalVerifierUrl) {
-        // Offloaded verify: same 400/503 semantics as the in-process path below.
-        // A definitive invalid chain (worker 200 {valid:false}) is a
-        // non-consuming 400; ANY failure to obtain a verdict (worker down,
-        // timeout, hash-pin mismatch, non-200) throws and becomes a
-        // non-consuming 503 — an infra fault must never be charged as an invalid
-        // contribution. zkeySha256 pins the worker to the exact `body` bytes we
-        // commit, so it can never verify bytes other than these (closes the TOCTOU
-        // where blobUrl could be swapped between our fetch and the worker's).
-        let isValid: boolean;
-        try {
-          isValid = await verifyRemote({
-            url: externalVerifierUrl,
-            token: process.env.CEREMONY_VERIFIER_TOKEN,
-            ptauUrl: precheck.circuit.ptauUrl,
-            genesisUrl: precheck.circuit.initialZkeyUrl,
-            genesisSha256: precheck.circuit.initialZkeyHash,
-            zkeyUrl: blobUrl,
-            zkeySha256: computedHash,
-          });
-        } catch (error) {
-          console.error(
-            `Remote verification failed to run for circuit ${id}:`,
-            error,
-          );
-          await deleteBinary(blobUrl).catch(() => {});
-          return NextResponse.json(
-            { error: "Verification temporarily unavailable. Please retry." },
-            { status: 503 },
-          );
-        }
-        if (!isValid) {
-          await deleteBinary(blobUrl).catch(() => {});
-          return NextResponse.json(
-            {
-              error:
-                "Verification failed. If your contribution is valid, please retry.",
-            },
-            { status: 400 },
-          );
-        }
-      } else {
+    if (mustVerify && externalVerifierUrl) {
+      // ===== Offload path: no zkey bytes flow through this function. =====
+      // Promote the client's pending upload into a coordinator-owned path with a
+      // server-side blob copy (bytes are duplicated inside Blob storage, never
+      // downloaded here). We then verify THIS committed copy, which the client
+      // cannot overwrite — so the bytes verified are exactly the bytes committed
+      // (no TOCTOU), and no per-attempt hash pin is needed. This is what keeps
+      // the ~137k-constraint circuits off the function's memory; the in-process
+      // fallback below buffers the whole zkey and OOMs on them.
+      let stored: { url: string; pathname: string };
+      try {
+        stored = await copyBinary(blobUrl, zkeyPath);
+      } catch (error) {
+        console.error(
+          `Failed to copy contribution blob for circuit ${id}:`,
+          error,
+        );
+        await deleteBinary(blobUrl).catch(() => {});
+        return NextResponse.json(
+          { error: "Could not store the contribution. Please retry." },
+          { status: 502 },
+        );
+      }
+      // The client's pending upload is now duplicated into our namespace.
+      await deleteBinary(blobUrl).catch(() => {});
+
+      // The worker fetches the committed copy, runs the same verifyChain, and
+      // returns its MPC view (csHash + head/link hashes + sha256). Same 400/503
+      // semantics as the in-process path: a definitive invalid chain is a
+      // non-consuming 400; any failure to obtain a verdict is a non-consuming 503
+      // (an infra fault must never be charged as an invalid contribution).
+      let remote;
+      try {
+        remote = await verifyRemote({
+          url: externalVerifierUrl,
+          token: process.env.CEREMONY_VERIFIER_TOKEN,
+          ptauUrl: precheck.circuit.ptauUrl,
+          genesisUrl: precheck.circuit.initialZkeyUrl,
+          genesisSha256: precheck.circuit.initialZkeyHash,
+          zkeyUrl: stored.url,
+          maxContributions,
+        });
+      } catch (error) {
+        console.error(
+          `Remote verification failed to run for circuit ${id}:`,
+          error,
+        );
+        await deleteBinary(stored.url).catch(() => {});
+        return NextResponse.json(
+          { error: "Verification temporarily unavailable. Please retry." },
+          { status: 503 },
+        );
+      }
+      if (!remote.valid) {
+        await deleteBinary(stored.url).catch(() => {});
+        return NextResponse.json(
+          {
+            error:
+              "Verification failed. If your contribution is valid, please retry.",
+          },
+          { status: 400 },
+        );
+      }
+      // valid === true guarantees the worker returned the MPC view (verifyRemote
+      // validates its shape and throws → 503 otherwise).
+      contribution = {
+        storedUrl: stored.url,
+        storedPathname: stored.pathname,
+        computedHash: remote.zkeySha256,
+        csHash: remote.csHash,
+        count: remote.count,
+        headHash: remote.headHash,
+        linkHash: remote.linkHash,
+      };
+    } else {
+      // ===== In-process fallback (flag unset: dev / CI / instant rollback). =====
+      // Downloads and parses the zkey in-function — memory-heavy, so production
+      // sets CEREMONY_VERIFIER_URL to take the offload path above. Kept working so
+      // clearing the flag is a real rollback.
+      const blobResponse = await fetch(blobUrl);
+      if (!blobResponse.ok) {
+        return NextResponse.json(
+          { error: "Failed to fetch uploaded zkey from blob storage" },
+          { status: 400 },
+        );
+      }
+      const body = new Uint8Array(await blobResponse.arrayBuffer());
+      if (body.length === 0) {
+        await deleteBinary(blobUrl).catch(() => {});
+        return NextResponse.json(
+          { error: "Contribution payload is empty" },
+          { status: 400 },
+        );
+      }
+
+      let mpc: MpcParams;
+      try {
+        mpc = await parseMpcParams(body, { maxContributions });
+      } catch {
+        await deleteBinary(blobUrl).catch(() => {});
+        return NextResponse.json(
+          { error: "Contribution is not a parseable zkey for this circuit." },
+          { status: 400 },
+        );
+      }
+
+      if (mustVerify) {
         try {
           const ptau = await loadPtau({
             url: precheck.circuit.ptauUrl,
             localPath: circuitConfig.artifacts.ptauPath,
           });
-
           // Verify against the pinned genesis: download it and confirm it still
-          // matches the hash from init, so the chain roots in the real genesis, not
-          // a swapped blob.
+          // matches the hash from init, so the chain roots in the real genesis.
           const genesisResponse = await fetch(precheck.circuit.initialZkeyUrl, {
             signal: AbortSignal.timeout(60_000),
           });
@@ -500,13 +482,10 @@ export async function POST(
               { status: 500 },
             );
           }
-
           const isValid = await verifyChain(ptau, genesis, body);
           if (!isValid) {
             // Don't consume the turn: verifyChain returns false on ANY failure, so
-            // an infra fault (e.g. /tmp full, OOM under load) is indistinguishable
-            // from an invalid chain — consuming would punish an honest contributor.
-            // They keep their turn and retry; poison just retries until it ages out.
+            // an infra fault is indistinguishable from an invalid chain.
             await deleteBinary(blobUrl).catch(() => {});
             return NextResponse.json(
               {
@@ -517,9 +496,6 @@ export async function POST(
             );
           }
         } catch (error) {
-          // The verifier couldn't run (download / hashing / snarkjs crash) — 503 to
-          // retry. Like the false branch, this never consumes the turn: an infra
-          // fault must not be charged as an invalid contribution.
           console.error(`Verification failed to run for circuit ${id}:`, error);
           await deleteBinary(blobUrl).catch(() => {});
           return NextResponse.json(
@@ -528,29 +504,33 @@ export async function POST(
           );
         }
       }
+
+      const computedHash = `0x${createHash("sha256").update(body).digest("hex")}`;
+      const stored = await putBinary(zkeyPath, body);
+      // The client's pending upload has been copied to our path.
+      await deleteBinary(blobUrl).catch(() => {});
+
+      const count = mpc.contributions.length;
+      contribution = {
+        storedUrl: stored.url,
+        storedPathname: stored.pathname,
+        computedHash,
+        csHash: mpc.csHash,
+        count,
+        headHash: count >= 1 ? mpc.contributions[count - 1].hash() : null,
+        linkHash: count >= 2 ? mpc.contributions[count - 2].hash() : null,
+      };
     }
 
-    // Unique path per attempt, never a shared or per-participant fixed path. Once
-    // a contribution commits, `currentZkeyUrl` points at this blob. Two concurrent
-    // attempts from the same participant must NOT share a path: otherwise the
-    // loser's cleanup delete below would remove the winner's just-committed head.
-    // Rejected attempts delete their own blob; only a crash leaks one, which the
-    // orphan-GC follow-up reclaims.
-    const zkeyPath = `${config.storage.zkeyPrefix}/${id}/pending-${participantId}-${crypto.randomUUID()}.zkey`;
-    const stored = await putBinary(zkeyPath, body);
-
-    // The client's pending upload has been copied to our path.
-    await deleteBinary(blobUrl).catch(() => {});
-
-    // Critical section: the per-circuit lock serializes this fast read+commit
-    // with the queue POST route, which writes the same circuit-state key. Heavy
-    // work already ran above, so the lock is held only for the brief commit and
-    // cannot expire mid-write.
+    // Critical section: the per-circuit lock serializes this fast commit with the
+    // queue POST route, which writes the same circuit-state key. Heavy work
+    // already ran above, so the lock is held only for the brief commit and cannot
+    // expire mid-write.
     const lockKey = `${config.storage.manifestPath}:lock:${id}`;
     const lockToken = crypto.randomUUID();
     const locked = await acquireLock(lockKey, lockToken);
     if (!locked) {
-      await deleteBinary(stored.url).catch(() => {});
+      await deleteBinary(contribution.storedUrl).catch(() => {});
       return NextResponse.json(
         { error: "Circuit busy. Please retry." },
         { status: 409 },
@@ -577,7 +557,7 @@ export async function POST(
         resolveMaxActiveSeconds(circuitConfig),
       );
       if (!eligible.ok) {
-        await deleteBinary(stored.url).catch(() => {});
+        await deleteBinary(contribution.storedUrl).catch(() => {});
         return NextResponse.json(
           { error: eligible.error },
           { status: eligible.status },
@@ -592,8 +572,7 @@ export async function POST(
       // for the finalize re-walk.
       const gate = await runContinuityGate({
         circuit,
-        body,
-        storedUrl: stored.url,
+        contribution,
         lockKey,
         lockToken,
         circuitStateKey: kvKey(config.storage.circuitStatePrefix, id),
@@ -622,11 +601,11 @@ export async function POST(
       });
 
       circuit.totalContributions += 1;
-      circuit.latestContributionHash = computedHash;
+      circuit.latestContributionHash = contribution.computedHash;
       circuit.chainHash = chainHash;
       circuit.queue.shift();
-      circuit.currentZkeyPath = stored.pathname;
-      circuit.currentZkeyUrl = stored.url;
+      circuit.currentZkeyPath = contribution.storedPathname;
+      circuit.currentZkeyUrl = contribution.storedUrl;
       // Advance the continuity head: totalContributions (incremented above) is the
       // new head count, and this is the hash the next submission must link to.
       circuit.headContributionHash = serverContributionHash;
@@ -635,7 +614,7 @@ export async function POST(
         circuitId: id,
         participantId,
         contributionIndex,
-        contributionHash: computedHash,
+        contributionHash: contribution.computedHash,
         clientContributionHash: clientHash,
         serverContributionHash,
         previousContributionHash,
@@ -664,7 +643,7 @@ export async function POST(
       // our snapshot is stale, so drop our blob and let the client retry. Do not
       // delete the previous zkey — the other writer now owns it.
       if (!committed) {
-        await deleteBinary(stored.url).catch(() => {});
+        await deleteBinary(contribution.storedUrl).catch(() => {});
         return NextResponse.json(
           { error: "Circuit busy. Please retry." },
           { status: 409 },
