@@ -2,6 +2,7 @@ export interface CircuitStatus {
   circuitId: string;
   targetContributions: number;
   totalContributions: number;
+  // "active" when a circuit has a contributor, else null — never a participant id.
   currentParticipant: string | null;
   queueLength: number;
   latestContributionHash: string | null;

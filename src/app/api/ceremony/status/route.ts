@@ -19,7 +19,10 @@ export async function GET() {
       circuitId: circuit.id,
       targetContributions: target,
       totalContributions: circuit.totalContributions,
-      currentParticipant: circuit.queue[0]?.participantId ?? null,
+      // Whether a circuit has an active contributor — NOT who. Was the front's
+      // participantId (a github:<id> resolvable to a real profile); now a
+      // non-identifying sentinel so consumers keep their active/waiting signal.
+      currentParticipant: circuit.queue[0] ? "active" : null,
       queueLength: circuit.queue.length,
       latestContributionHash: circuit.latestContributionHash,
       chainHash: circuit.chainHash,
