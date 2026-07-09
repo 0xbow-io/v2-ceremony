@@ -5,6 +5,7 @@ import { generateInitialZkey } from "@wonderland/cabure-crypto";
 import {
   getCeremonyConfig,
   type CeremonyCircuitConfig,
+  type CeremonyConfig,
   type CeremonyTierConfig,
   type TierId,
 } from "./ceremony-config";
@@ -48,8 +49,15 @@ export interface QueueEntry {
   // Hard progress clock for the ACTIVE slot (queue[0]). Stamped once when a
   // participant reaches the front and never bumped by the heartbeat, so it
   // bounds how long anyone may hold the front regardless of liveness. Only the
-  // front entry carries it. See advanceActiveSlot.
+  // front entry carries it. See reconcileFront.
   activeSince?: number;
+  // Latched (once) the first time the front-runner proves it is alive after
+  // reaching the front — any POST /queue while it is the head sets this. Until
+  // it is set, the head has only claimWindowSeconds before being skipped as a
+  // no-show (a closed/dead tab). Once set, the active-slot cap governs instead,
+  // so a slow-but-live contributor is never skipped. Only the front entry
+  // carries it. See reconcileFront.
+  claimedAt?: number;
 }
 
 export interface CircuitState {
@@ -420,39 +428,93 @@ export function resolveMaxActiveSeconds(
   );
 }
 
-// Enforce the active-slot cap and keep the front's progress clock consistent.
-// Call AFTER pruneExpiredEntries, on any read of a circuit's queue:
-//   - only the front (queue[0]) is the active contributor, so any stray
-//     activeSince behind it is cleared;
-//   - if the front has held the slot longer than maxActiveSeconds it is rotated
-//     to the BACK of this circuit's queue (its liveness clock reset, its
-//     progress clock cleared) so the next participant takes over;
-//   - whoever is at the front afterwards gets activeSince stamped so their hard
-//     clock starts.
-// Pure and idempotent: returns a new array of shallow-copied entries and leaves
-// the input untouched, so it is safe to call on both persisted (POST/contribute)
-// and read-only (GET/upload) paths.
-export function advanceActiveSlot(
+export interface ReconcileFrontResult {
+  queue: QueueEntry[];
+  // Participants removed as no-shows this call. A persisting caller counts each
+  // toward the no-show limit; read-only callers ignore it.
+  evictedNoShowIds: string[];
+}
+
+export interface ReconcileFrontOptions {
+  now?: number;
+  // Grace to CLAIM after reaching the front (unclaimed past this → no-show skip).
+  claimWindowSeconds: number;
+  // Hard cap for a CLAIMED (live, working) front-runner before rotation.
+  maxActiveSeconds: number;
+}
+
+// Reconcile the front of the queue against its two clocks, returning a NEW queue
+// plus any ids skipped as no-shows. Call AFTER pruneExpiredEntries, on any read
+// of a circuit's queue. Rules, in order:
+//   - only the front (queue[0]) holds the slot, so stray activeSince/claimedAt on
+//     entries behind it is cleared;
+//   - a head that has NOT claimed within claimWindowSeconds of reaching the front
+//     is a no-show (a closed/dead tab): it is EVICTED (removed, not rotated — a
+//     closed tab gets no second turn) and its id returned so the caller can count
+//     it toward the block;
+//   - a head that HAS claimed but held the slot past maxActiveSeconds overran the
+//     cap: it is rotated to the BACK so the line advances. Guarded by length > 1
+//     so a LONE head can never rotate onto itself and reset its own clock (the
+//     bug that let a single front-runner bypass the cap indefinitely);
+//   - whoever is at the front afterwards gets activeSince stamped so its clocks
+//     start.
+// At most one head is resolved per call; the promoted entry starts fresh. Pure
+// and idempotent — leaves the input untouched — so it is safe on both persisted
+// (POST/contribute) and read-only (GET/upload) paths.
+export function reconcileFront(
   queue: QueueEntry[],
-  maxActiveSeconds: number,
-  now: number = Date.now(),
-): QueueEntry[] {
+  options: ReconcileFrontOptions,
+): ReconcileFrontResult {
+  const now = options.now ?? Date.now();
+  const claimWindowMs = options.claimWindowSeconds * 1000;
+  const maxActiveMs = options.maxActiveSeconds * 1000;
+  const evictedNoShowIds: string[] = [];
+
   const next = queue.map((entry) => ({ ...entry }));
   for (let i = 1; i < next.length; i++) {
     next[i].activeSince = undefined;
+    next[i].claimedAt = undefined;
   }
-  const maxMs = maxActiveSeconds * 1000;
+
   const front = next[0];
-  if (front && front.activeSince != null && now - front.activeSince > maxMs) {
-    const kicked = next.shift()!;
-    kicked.activeSince = undefined;
-    kicked.joinedAt = now;
-    next.push(kicked);
+  if (front && front.activeSince != null) {
+    if (front.claimedAt == null && now - front.activeSince > claimWindowMs) {
+      // No-show: reached the front but never proved it is alive. Remove it (a
+      // closed tab gets no rotation) and report it for the no-show counter.
+      evictedNoShowIds.push(front.participantId);
+      next.shift();
+    } else if (
+      front.claimedAt != null &&
+      now - front.activeSince > maxActiveMs &&
+      next.length > 1
+    ) {
+      // Overtime: claimed and working, but overran the cap. Rotate to the back so
+      // the line advances. length > 1 prevents a lone head from rotating onto
+      // itself (which would reset its clock); with no one waiting it simply keeps
+      // the slot until someone joins.
+      const kicked = next.shift()!;
+      kicked.activeSince = undefined;
+      kicked.claimedAt = undefined;
+      kicked.joinedAt = now;
+      next.push(kicked);
+    }
   }
+
   if (next[0] && next[0].activeSince == null) {
     next[0].activeSince = now;
   }
-  return next;
+
+  return { queue: next, evictedNoShowIds };
+}
+
+// KV key for a participant's no-show counter on a circuit. Per-circuit: a block
+// on the current circuit gates their whole run (circuits are done in order).
+export function noShowKey(
+  config: CeremonyConfig,
+  circuitId: string,
+  participantId: string,
+): string {
+  return `${config.storage.noShowPrefix}:${circuitId}:${participantId}`;
 }
 
 export function kvKey(prefix: string, suffix: string): string {

@@ -186,6 +186,18 @@ export interface CeremonyConfig {
   targetContributions: number;
   endDate: string | null;
   queueTimeoutSeconds: number;
+  // Grace period (seconds) for the participant who just reached the FRONT to
+  // prove they are alive (a fast claim ping from their client). If nothing
+  // arrives within this window they are treated as a no-show — a closed/dead
+  // tab — and skipped, instead of holding the slot for the full active-slot cap.
+  claimWindowSeconds: number;
+  // How many no-shows on a circuit before the participant is temporarily blocked
+  // from re-joining that circuit's queue (so a tab that will never respond stops
+  // being counted as a queue member).
+  maxNoShows: number;
+  // How long that block lasts before it auto-lifts, so a real contributor who hit
+  // a transient issue can return without operator help.
+  noShowCooldownSeconds: number;
   verifyContributions?: boolean;
   tiersEnabled?: boolean;
   tiers?: CeremonyTierConfig[];
@@ -201,6 +213,8 @@ export interface CeremonyConfig {
     participantContributionsPrefix: string;
     participantsIndexPath: string;
     zkeyPrefix: string;
+    // Prefix for the per-participant per-circuit no-show counter keys.
+    noShowPrefix: string;
   };
   copy: CeremonyCopy;
 }

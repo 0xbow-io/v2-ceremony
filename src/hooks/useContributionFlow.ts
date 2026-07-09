@@ -48,6 +48,16 @@ const MAX_SLOT_WAITS = 10;
 // of margin under the 300s default and must stay comfortably below it.
 const QUEUE_HEARTBEAT_MS = 90_000;
 
+// Fast "I'm here" claim ping once we reach the FRONT. The server skips a head
+// that never proves it is alive within claimWindowSeconds (~30s) as a no-show (a
+// closed/dead tab), so the 90s heartbeat is too slow to claim the slot. Any POST
+// /queue while we are the head latches the claim server-side; after that the
+// generous active-slot cap governs and a slow-but-live contributor is safe. We
+// ping every 10s but only a few times (covering the ~30s window with retry
+// margin), then stop so a long compute isn't spammed with POSTs.
+const CLAIM_PING_MS = 10_000;
+const CLAIM_MAX_PINGS = 4;
+
 // Server receipt plus the contributor's OWN h_k, computed client-side
 // (`result.contributionHash` from contribute(), not the server's
 // `serverContributionHash`). The attestation publishes this so it is the
@@ -135,6 +145,14 @@ export function useContributionFlow(options: {
   // cancels it and so consecutive waits are bounded by MAX_SLOT_WAITS.
   const slotWaitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const slotWaitsRef = useRef(0);
+  // Count of fast claim pings sent for the current FRONT TURN, so we stop after
+  // CLAIM_MAX_PINGS instead of spamming through a long compute. Reset on each
+  // fresh entry into the front (see atFrontRef), so a participant rotated to the
+  // back and cycling around again re-claims on their next turn.
+  const claimPingsRef = useRef(0);
+  // Tracks whether we were at the front on the previous render, to detect the
+  // transition INTO the front (the start of a new front turn).
+  const atFrontRef = useRef(false);
 
   const clearAutoRetry = useCallback(() => {
     attemptsRef.current = 0;
@@ -594,6 +612,62 @@ export function useContributionFlow(options: {
       clearInterval(timer);
     };
   }, [flowActive, currentCircuitId, finalizeReady, blockedOnManualError]);
+
+  // Fast claim ping. Once we reach the FRONT (or are actively contributing), POST
+  // /queue every ~10s — but only CLAIM_MAX_PINGS times — so the server latches
+  // our claim well inside its claim window and does not skip us as a no-show. The
+  // 90s heartbeat above is too slow for that window; a closed tab sends none of
+  // these and is skipped. Bounded so a long compute isn't flooded with POSTs
+  // (once latched, further pings are redundant — the active-slot cap governs).
+  useEffect(() => {
+    const atFront =
+      queueQuery.data?.position === 1 || contributeMutation.isPending;
+    // Fresh entry into the front (including after being rotated to the back and
+    // cycling around, or moving to a new circuit) starts a new front turn, so
+    // refill the ping budget. Must run before the budget guard below.
+    if (atFront && !atFrontRef.current) {
+      claimPingsRef.current = 0;
+    }
+    atFrontRef.current = atFront;
+    if (
+      !flowActive ||
+      !currentCircuitId ||
+      finalizeReady ||
+      blockedOnManualError ||
+      !atFront ||
+      claimPingsRef.current >= CLAIM_MAX_PINGS
+    ) {
+      return;
+    }
+    let cancelled = false;
+    const claim = () => {
+      if (cancelled || claimPingsRef.current >= CLAIM_MAX_PINGS) return;
+      claimPingsRef.current += 1;
+      joinQueue({ circuitIds: [currentCircuitId] }).catch(() => {
+        /* best-effort; the heartbeat and later POSTs also latch the claim */
+      });
+    };
+    claim();
+    const timer = setInterval(() => {
+      if (cancelled || claimPingsRef.current >= CLAIM_MAX_PINGS) {
+        clearInterval(timer);
+        return;
+      }
+      claim();
+    }, CLAIM_PING_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    queueQuery.data?.position,
+    contributeMutation.isPending,
+    flowActive,
+    currentCircuitId,
+    finalizeReady,
+    blockedOnManualError,
+  ]);
 
   // --- Actions (same public API) ---
 
