@@ -8,11 +8,22 @@
 // snarkjs pairings run off the Vercel function.
 //
 // Signalling contract with the route (contribute/route.ts):
-//   200 {valid:true}   -> route commits
-//   200 {valid:false}  -> route returns non-consuming 400 (definitive bad chain)
-//   any non-2xx / error -> route returns non-consuming 503 (verify couldn't RUN)
-// So this server only ever emits {valid:false} for a genuine verifyChain=false;
-// every infra fault (download failure, hash-pin mismatch, crash) is a 4xx/5xx.
+//   200 {valid:true, ...mpcView}       -> route commits. mpcView (csHash, count,
+//        headHash, linkHash) is present when the caller supplied continuity
+//        anchors; the route runs its authoritative continuity gate on it.
+//   200 {valid:false, rejected:true}   -> DEFINITIVE participant fault, decided
+//        BEFORE pairings when anchors are supplied: an unparseable zkey, a
+//        forged/short contribution count, a wrong circuit (csHash), or one that
+//        does not build on the recorded head (link mismatch). The route CONSUMES
+//        the front-of-queue turn so it can't be replayed to hold the slot.
+//   200 {valid:false, rejected:false}  -> verifyChain returned false. Ambiguous
+//        (a worker infra fault is indistinguishable from an invalid chain), so
+//        the route does NOT consume the turn — the contributor keeps it and
+//        retries.
+//   any non-2xx / error                -> route returns a non-consuming 503
+//        (verify couldn't RUN).
+// Every infra fault (download failure, pin mismatch, crash) is a 4xx/5xx, never
+// {valid:false}.
 
 import { createServer } from "node:http";
 import { createHash, timingSafeEqual } from "node:crypto";
@@ -23,7 +34,7 @@ import { createRequire } from "node:module";
 // Load the package's CJS build via the "require" export condition instead —
 // Node's native require() supports the dynamic require the bundle needs.
 const require = createRequire(import.meta.url);
-const { verifyChain } = require("@wonderland/cabure-crypto");
+const { verifyChain, parseMpcParams } = require("@wonderland/cabure-crypto");
 
 // snarkjs (via fastfile) leaves file handles for the GC to close; on recent Node
 // a GC-closed FileHandle throws an uncaught async ERR_INVALID_STATE that would
@@ -146,21 +157,51 @@ async function handleVerify(req, res) {
     return json(res, 400, { error: "invalid JSON body" });
   }
 
-  const { ptauUrl, genesisUrl, genesisSha256, zkeyUrl, zkeySha256 } = params ?? {};
+  const {
+    ptauUrl,
+    genesisUrl,
+    genesisSha256,
+    zkeyUrl,
+    zkeySha256,
+    expectedCount,
+    expectedCsHash,
+    expectedLinkHash,
+  } = params ?? {};
   if (
     typeof ptauUrl !== "string" ||
     typeof genesisUrl !== "string" ||
     typeof genesisSha256 !== "string" ||
-    typeof zkeyUrl !== "string" ||
-    typeof zkeySha256 !== "string"
+    typeof zkeyUrl !== "string"
   ) {
     return json(res, 400, { error: "missing or malformed fields" });
+  }
+  // Legacy per-attempt hash pin: optional now. Newer callers promote the zkey
+  // into a coordinator-owned path and verify THAT copy, so the bytes verified
+  // are already the bytes committed and no pin is needed. When a caller does send
+  // one we still enforce it (below), so an old route + new worker stays safe.
+  if (zkeySha256 !== undefined && typeof zkeySha256 !== "string") {
+    return json(res, 400, { error: "malformed zkeySha256" });
+  }
+  // Continuity anchors (new callers): their presence means "return the MPC view
+  // AND fail-fast on a non-extending contribution before the expensive verify".
+  // expectedCount also bounds the parse. Absent (legacy caller) -> pin+verify only.
+  const wantMpc = expectedCount !== undefined;
+  if (wantMpc) {
+    if (!Number.isInteger(expectedCount) || expectedCount < 0) {
+      return json(res, 400, { error: "malformed expectedCount" });
+    }
+    if (typeof expectedCsHash !== "string") {
+      return json(res, 400, { error: "malformed expectedCsHash" });
+    }
+    if (expectedLinkHash !== null && typeof expectedLinkHash !== "string") {
+      return json(res, 400, { error: "malformed expectedLinkHash" });
+    }
   }
   if (![ptauUrl, genesisUrl, zkeyUrl].every(isAllowedUrl)) {
     return json(res, 400, { error: "url not allowed (must be a public Blob https URL)" });
   }
 
-  // Fetch inputs + enforce both sha256 pins. A pin mismatch is an infra/config
+  // Fetch inputs + enforce the genesis pin. A pin mismatch is an infra/config
   // fault (or a swapped blob), NOT an invalid chain -> throw -> 5xx -> route 503.
   const started = Date.now();
   let ptau, genesis, zkey;
@@ -176,11 +217,49 @@ async function handleVerify(req, res) {
   }
 
   const zkeyHash = sha256Hex(zkey);
-  if (zkeyHash !== zkeySha256) {
-    // The bytes at zkeyUrl are not the bytes the route will commit. Refuse —
-    // never verify anything other than the pinned bytes.
+  if (zkeySha256 !== undefined && zkeyHash !== zkeySha256) {
+    // Legacy pin path: the bytes at zkeyUrl are not the pinned bytes. Refuse.
     console.error(`[verifier] zkey hash mismatch: got ${zkeyHash}, expected ${zkeySha256}`);
     return json(res, 422, { error: "zkey does not match the pinned hash" });
+  }
+
+  // Read the MPC section (snarkjs zkey section 10) and run the continuity filter
+  // BEFORE the expensive verify: an unparseable zkey, a forged count, a wrong
+  // circuit, or a contribution that does not extend the recorded head is a
+  // definitive bad submission, so report it invalid (200 {valid:false}) without
+  // paying for pairings. Cheap: bounds-checked reads + at most two Blake2b hashes,
+  // no pairings. Mirrors the route's authoritative gate using the coordinator's
+  // anchors (the route still re-checks under the lock). Only when anchors were
+  // supplied (wantMpc).
+  let mpcView = null;
+  if (wantMpc) {
+    let mpc;
+    try {
+      mpc = await parseMpcParams(zkey, { maxContributions: expectedCount });
+    } catch (error) {
+      console.warn(`[verifier] mpc parse rejected: ${error?.message}`);
+      // Definitive participant fault (not a parseable zkey / forged count) ->
+      // route consumes the front-of-queue turn.
+      return json(res, 200, { valid: false, rejected: true });
+    }
+    const count = mpc.contributions.length;
+    const headHash = count >= 1 ? mpc.contributions[count - 1].hash() : null;
+    const linkHash = count >= 2 ? mpc.contributions[count - 2].hash() : null;
+    // Continuity pre-filter: exactly one more contribution than the head, same
+    // circuit, and (past genesis) building on the recorded head hash.
+    if (
+      count !== expectedCount ||
+      mpc.csHash !== expectedCsHash ||
+      (expectedCount > 1 && linkHash !== expectedLinkHash)
+    ) {
+      console.warn(
+        `[verifier] continuity pre-filter rejected: count=${count} expected=${expectedCount}`,
+      );
+      // Definitive participant fault (does not extend the recorded head) ->
+      // route consumes the front-of-queue turn.
+      return json(res, 200, { valid: false, rejected: true });
+    }
+    mpcView = { csHash: mpc.csHash, count, headHash, linkHash };
   }
 
   // verifyChain swallows internal throws and returns false. A false here is
@@ -198,7 +277,13 @@ async function handleVerify(req, res) {
   console.log(
     `[verifier] verify done valid=${valid} ms=${Date.now() - started} zkeyBytes=${zkey.length}`,
   );
-  return json(res, 200, { valid });
+  // verifyChain returns false on ANY failure, so a worker infra fault (OOM,
+  // /tmp full) is indistinguishable from an invalid chain: mark it non-consuming
+  // (rejected:false) so an honest contributor is not charged for a worker blip.
+  if (!valid) return json(res, 200, { valid: false, rejected: false });
+  // Return the sha256 (so the route can record it without re-hashing) and, when
+  // requested, the MPC view the route's continuity gate needs.
+  return json(res, 200, { valid: true, zkeySha256: zkeyHash, ...(mpcView ?? {}) });
 }
 
 const server = createServer((req, res) => {
