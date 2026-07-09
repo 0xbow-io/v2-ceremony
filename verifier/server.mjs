@@ -8,11 +8,19 @@
 // snarkjs pairings run off the Vercel function.
 //
 // Signalling contract with the route (contribute/route.ts):
-//   200 {valid:true}   -> route commits
-//   200 {valid:false}  -> route returns non-consuming 400 (definitive bad chain)
-//   any non-2xx / error -> route returns non-consuming 503 (verify couldn't RUN)
-// So this server only ever emits {valid:false} for a genuine verifyChain=false;
-// every infra fault (download failure, hash-pin mismatch, crash) is a 4xx/5xx.
+//   200 {valid:true, ...mpcView} -> route commits. mpcView (csHash, count,
+//        headHash, linkHash) is present when the caller supplied continuity
+//        anchors; the route runs its authoritative continuity gate on it.
+//   200 {valid:false}            -> route returns a non-consuming 400. This is a
+//        DEFINITIVE bad submission and now covers more than verifyChain=false:
+//        with anchors supplied it also means an unparseable zkey, a forged/short
+//        contribution count, a wrong circuit (csHash), or one that does not build
+//        on the recorded head (link mismatch) — all rejected before pairings.
+//   any non-2xx / error          -> route returns a non-consuming 503 (verify
+//        couldn't RUN).
+// {valid:false} is never turn-consuming; repeat grief is bounded by the route's
+// active-slot cap. Every infra fault (download failure, pin mismatch, crash) is a
+// 4xx/5xx, never {valid:false}.
 
 import { createServer } from "node:http";
 import { createHash, timingSafeEqual } from "node:crypto";
@@ -146,8 +154,16 @@ async function handleVerify(req, res) {
     return json(res, 400, { error: "invalid JSON body" });
   }
 
-  const { ptauUrl, genesisUrl, genesisSha256, zkeyUrl, zkeySha256, maxContributions } =
-    params ?? {};
+  const {
+    ptauUrl,
+    genesisUrl,
+    genesisSha256,
+    zkeyUrl,
+    zkeySha256,
+    expectedCount,
+    expectedCsHash,
+    expectedLinkHash,
+  } = params ?? {};
   if (
     typeof ptauUrl !== "string" ||
     typeof genesisUrl !== "string" ||
@@ -163,11 +179,20 @@ async function handleVerify(req, res) {
   if (zkeySha256 !== undefined && typeof zkeySha256 !== "string") {
     return json(res, 400, { error: "malformed zkeySha256" });
   }
-  // When present, the caller wants the MPC view back (csHash + head/link hashes)
-  // and this bounds the parse so a forged count is rejected before it is walked.
-  const wantMpc = maxContributions !== undefined;
-  if (wantMpc && (!Number.isInteger(maxContributions) || maxContributions < 0)) {
-    return json(res, 400, { error: "malformed maxContributions" });
+  // Continuity anchors (new callers): their presence means "return the MPC view
+  // AND fail-fast on a non-extending contribution before the expensive verify".
+  // expectedCount also bounds the parse. Absent (legacy caller) -> pin+verify only.
+  const wantMpc = expectedCount !== undefined;
+  if (wantMpc) {
+    if (!Number.isInteger(expectedCount) || expectedCount < 0) {
+      return json(res, 400, { error: "malformed expectedCount" });
+    }
+    if (typeof expectedCsHash !== "string") {
+      return json(res, 400, { error: "malformed expectedCsHash" });
+    }
+    if (expectedLinkHash !== null && typeof expectedLinkHash !== "string") {
+      return json(res, 400, { error: "malformed expectedLinkHash" });
+    }
   }
   if (![ptauUrl, genesisUrl, zkeyUrl].every(isAllowedUrl)) {
     return json(res, 400, { error: "url not allowed (must be a public Blob https URL)" });
@@ -195,26 +220,39 @@ async function handleVerify(req, res) {
     return json(res, 422, { error: "zkey does not match the pinned hash" });
   }
 
-  // Read the MPC section (snarkjs zkey section 10) BEFORE the expensive verify:
-  // a malformed zkey or a forged contribution count is a definitive bad
-  // submission, so report it invalid without paying for pairings. Cheap
-  // (bounds-checked reads + at most two Blake2b hashes, no pairings). Only when
-  // the caller asked for it (maxContributions present).
+  // Read the MPC section (snarkjs zkey section 10) and run the continuity filter
+  // BEFORE the expensive verify: an unparseable zkey, a forged count, a wrong
+  // circuit, or a contribution that does not extend the recorded head is a
+  // definitive bad submission, so report it invalid (200 {valid:false}) without
+  // paying for pairings. Cheap: bounds-checked reads + at most two Blake2b hashes,
+  // no pairings. Mirrors the route's authoritative gate using the coordinator's
+  // anchors (the route still re-checks under the lock). Only when anchors were
+  // supplied (wantMpc).
   let mpcView = null;
   if (wantMpc) {
+    let mpc;
     try {
-      const mpc = await parseMpcParams(zkey, { maxContributions });
-      const count = mpc.contributions.length;
-      mpcView = {
-        csHash: mpc.csHash,
-        count,
-        headHash: count >= 1 ? mpc.contributions[count - 1].hash() : null,
-        linkHash: count >= 2 ? mpc.contributions[count - 2].hash() : null,
-      };
+      mpc = await parseMpcParams(zkey, { maxContributions: expectedCount });
     } catch (error) {
       console.warn(`[verifier] mpc parse rejected: ${error?.message}`);
       return json(res, 200, { valid: false });
     }
+    const count = mpc.contributions.length;
+    const headHash = count >= 1 ? mpc.contributions[count - 1].hash() : null;
+    const linkHash = count >= 2 ? mpc.contributions[count - 2].hash() : null;
+    // Continuity pre-filter: exactly one more contribution than the head, same
+    // circuit, and (past genesis) building on the recorded head hash.
+    if (
+      count !== expectedCount ||
+      mpc.csHash !== expectedCsHash ||
+      (expectedCount > 1 && linkHash !== expectedLinkHash)
+    ) {
+      console.warn(
+        `[verifier] continuity pre-filter rejected: count=${count} expected=${expectedCount}`,
+      );
+      return json(res, 200, { valid: false });
+    }
+    mpcView = { csHash: mpc.csHash, count, headHash, linkHash };
   }
 
   // verifyChain swallows internal throws and returns false. A false here is

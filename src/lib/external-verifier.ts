@@ -26,24 +26,33 @@ export interface VerifyRemoteRequest {
   // copy). The client cannot overwrite it, so the bytes the worker verifies are
   // exactly the bytes that will be committed — no per-attempt hash pin needed.
   zkeyUrl: string;
-  // Upper bound on the embedded contribution count (headCount + 1). The worker
-  // rejects a forged larger count before walking the MPC section.
-  maxContributions: number;
+  // Continuity anchors from the coordinator's current head. They let the worker
+  // reject a non-extending contribution BEFORE the expensive pairings (a cheap
+  // parse + comparison), instead of verifying it only for the route to reject it
+  // under the lock. The front-of-queue slot can't advance under the submitter, so
+  // these are stable for the request; the route still re-checks them
+  // authoritatively under the lock.
+  expectedCount: number; // headCount + 1; also bounds the MPC parse.
+  expectedCsHash: string; // circuit identity (csHash), constant across the chain.
+  expectedLinkHash: string | null; // head this must build on; null at genesis.
 }
 
 // The worker's verdict plus the MPC view it read from the committed zkey, so the
 // route can run the continuity gate and record the receipt without ever loading
-// the bytes itself. Metadata fields are present iff valid === true.
-export interface RemoteVerifyResult {
-  valid: boolean;
-  zkeySha256: string;
-  csHash: string;
-  count: number;
-  // h_k of the last (new-head) contribution; null only for an empty chain.
-  headHash: string | null;
-  // h_{k-1}: hash of the entry at count-2; null when count < 2.
-  linkHash: string | null;
-}
+// the bytes itself. A discriminated union: the metadata exists ONLY on the valid
+// branch, so a caller cannot read a hash without first narrowing on `valid`.
+export type RemoteVerifyResult =
+  | { valid: false }
+  | {
+      valid: true;
+      zkeySha256: string;
+      csHash: string;
+      count: number;
+      // h_k of the last (new-head) contribution; null only for an empty chain.
+      headHash: string | null;
+      // h_{k-1}: hash of the entry at count-2; null when count < 2.
+      linkHash: string | null;
+    };
 
 // Under the 300s function budget after the route has already spent time on the
 // blob fetch + parse; keep this safely below it so the platform never kills the
@@ -117,7 +126,9 @@ export async function verifyRemote(
       genesisUrl: req.genesisUrl,
       genesisSha256: req.genesisSha256,
       zkeyUrl: req.zkeyUrl,
-      maxContributions: req.maxContributions,
+      expectedCount: req.expectedCount,
+      expectedCsHash: req.expectedCsHash,
+      expectedLinkHash: req.expectedLinkHash,
     }),
     signal: AbortSignal.timeout(REMOTE_VERIFY_TIMEOUT_MS),
   });
@@ -131,14 +142,7 @@ export async function verifyRemote(
     throw new Error("verifier returned a malformed response (no boolean valid)");
   }
   if (!data.valid) {
-    return {
-      valid: false,
-      zkeySha256: "",
-      csHash: "",
-      count: 0,
-      headHash: null,
-      linkHash: null,
-    };
+    return { valid: false };
   }
 
   // valid === true: the MPC view the route needs for continuity + the receipt

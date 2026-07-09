@@ -375,11 +375,14 @@ export async function POST(
       // The client's pending upload is now duplicated into our namespace.
       await deleteBinary(blobUrl).catch(() => {});
 
-      // The worker fetches the committed copy, runs the same verifyChain, and
-      // returns its MPC view (csHash + head/link hashes + sha256). Same 400/503
-      // semantics as the in-process path: a definitive invalid chain is a
-      // non-consuming 400; any failure to obtain a verdict is a non-consuming 503
-      // (an infra fault must never be charged as an invalid contribution).
+      // The worker fetches the committed copy, cheaply rejects a non-extending
+      // upload via the continuity anchors BEFORE pairings, else runs the same
+      // verifyChain and returns its MPC view (csHash + head/link hashes + sha256)
+      // for the authoritative gate below. A false verdict is a DEFINITIVE bad
+      // submission (invalid chain, unparseable, or non-extending) -> non-consuming
+      // 400; any failure to obtain a verdict -> non-consuming 503 (an infra fault
+      // must never be charged as an invalid contribution). Repeat grief is bounded
+      // by the active-slot cap, and the anchors keep it cheap (no wasted pairings).
       let remote;
       try {
         remote = await verifyRemote({
@@ -389,7 +392,9 @@ export async function POST(
           genesisUrl: precheck.circuit.initialZkeyUrl,
           genesisSha256: precheck.circuit.initialZkeyHash,
           zkeyUrl: stored.url,
-          maxContributions,
+          expectedCount: maxContributions,
+          expectedCsHash: precheck.circuit.csHash,
+          expectedLinkHash: precheck.circuit.headContributionHash,
         });
       } catch (error) {
         console.error(
