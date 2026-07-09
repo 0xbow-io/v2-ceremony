@@ -10,14 +10,18 @@ export async function GET(
   const nextIndex = circuit.totalContributions + 1;
 
   if (request.nextUrl.searchParams.get("format") === "json") {
-    return NextResponse.json({
-      url: circuit.currentZkeyUrl,
-      contributionIndex: nextIndex,
-      hash: circuit.latestContributionHash ?? null,
-    });
+    return NextResponse.json(
+      {
+        url: circuit.currentZkeyUrl,
+        contributionIndex: nextIndex,
+        hash: circuit.latestContributionHash ?? null,
+      },
+      { headers: { "Cache-Control": "no-store" } },
+    );
   }
 
   const response = NextResponse.redirect(circuit.currentZkeyUrl, 307);
   response.headers.set("X-Contribution-Index", String(nextIndex));
+  response.headers.set("Cache-Control", "no-store");
   return response;
 }
