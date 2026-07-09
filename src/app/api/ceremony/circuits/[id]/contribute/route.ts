@@ -279,15 +279,22 @@ async function checkEligibility(
   ) {
     circuit.queue[0].claimedAt = now;
   }
-  // Reconcile the front (skip a no-show head ahead, rotate an over-cap head,
-  // stamp clocks) so the real next participant passes the front check. On the
-  // accept path this mutated queue is what writeContribution persists. No-show
-  // counting is owned by the queue route, so evictions here are not counted.
-  const { queue } = reconcileFront(circuit.queue, {
+  // Reconcile the front to decide whether we are truly at the front. No-show
+  // counting is owned solely by the queue route, so this path must NEVER persist
+  // an uncounted no-show eviction: if the reconcile finds a no-show head AHEAD of
+  // us, do NOT commit that eviction here — bail with "not at front" and let a
+  // queue POST (our own claim ping, or another waiter's) evict AND count it. We
+  // will be at the front on the immediate retry. This keeps the cooldown from
+  // being bypassed when /contribute would otherwise be the path that removed the
+  // no-show.
+  const { queue, evictedNoShowIds } = reconcileFront(circuit.queue, {
     now,
     claimWindowSeconds,
     maxActiveSeconds,
   });
+  if (evictedNoShowIds.length > 0) {
+    return { ok: false, error: "Not at front of the queue", status: 409 };
+  }
   circuit.queue = queue;
 
   if (circuit.queue[0]?.participantId !== participantId) {

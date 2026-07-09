@@ -145,10 +145,14 @@ export function useContributionFlow(options: {
   // cancels it and so consecutive waits are bounded by MAX_SLOT_WAITS.
   const slotWaitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const slotWaitsRef = useRef(0);
-  // Count of fast claim pings sent for the CURRENT circuit's front turn, so we
-  // stop after CLAIM_MAX_PINGS instead of spamming through a long compute. Reset
-  // when the current circuit changes.
+  // Count of fast claim pings sent for the current FRONT TURN, so we stop after
+  // CLAIM_MAX_PINGS instead of spamming through a long compute. Reset on each
+  // fresh entry into the front (see atFrontRef), so a participant rotated to the
+  // back and cycling around again re-claims on their next turn.
   const claimPingsRef = useRef(0);
+  // Tracks whether we were at the front on the previous render, to detect the
+  // transition INTO the front (the start of a new front turn).
+  const atFrontRef = useRef(false);
 
   const clearAutoRetry = useCallback(() => {
     attemptsRef.current = 0;
@@ -609,12 +613,6 @@ export function useContributionFlow(options: {
     };
   }, [flowActive, currentCircuitId, finalizeReady, blockedOnManualError]);
 
-  // Reset the fast-claim-ping budget whenever we move to a new circuit (or the
-  // flow restarts) — each front turn gets its own CLAIM_MAX_PINGS.
-  useEffect(() => {
-    claimPingsRef.current = 0;
-  }, [currentCircuitId, flowRunId]);
-
   // Fast claim ping. Once we reach the FRONT (or are actively contributing), POST
   // /queue every ~10s — but only CLAIM_MAX_PINGS times — so the server latches
   // our claim well inside its claim window and does not skip us as a no-show. The
@@ -624,6 +622,13 @@ export function useContributionFlow(options: {
   useEffect(() => {
     const atFront =
       queueQuery.data?.position === 1 || contributeMutation.isPending;
+    // Fresh entry into the front (including after being rotated to the back and
+    // cycling around, or moving to a new circuit) starts a new front turn, so
+    // refill the ping budget. Must run before the budget guard below.
+    if (atFront && !atFrontRef.current) {
+      claimPingsRef.current = 0;
+    }
+    atFrontRef.current = atFront;
     if (
       !flowActive ||
       !currentCircuitId ||

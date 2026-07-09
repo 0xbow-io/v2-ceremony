@@ -36,15 +36,26 @@ export async function getJsonMany<T>(keys: string[]): Promise<(T | null)[]> {
 // Atomic counter with a sliding TTL, for the no-show tracker. INCR creates the
 // key at 1 on first use; the EXPIRE refreshes the window on every no-show, so the
 // block lasts noShowCooldownSeconds from the LAST no-show and then the key (and
-// the count) vanish on their own — that is the cooldown auto-lift.
+// the count) vanish on their own — that is the cooldown auto-lift. Done in ONE
+// EVAL so the increment and the TTL are inseparable: a failure between two
+// separate commands could leave the key with no expiry and block a participant
+// forever, requiring manual cleanup.
+const INCREMENT_WITH_TTL_SCRIPT = `
+  local count = redis.call("incr", KEYS[1])
+  redis.call("expire", KEYS[1], ARGV[1])
+  return count
+`;
+
 export async function incrementWithTtl(
   key: string,
   ttlSeconds: number,
 ): Promise<number> {
-  const client = redis();
-  const count = await client.incr(key);
-  await client.expire(key, ttlSeconds);
-  return count;
+  const result = await redis().eval(
+    INCREMENT_WITH_TTL_SCRIPT,
+    [key],
+    [String(ttlSeconds)],
+  );
+  return Number(result);
 }
 
 // Current counter value (0 when absent). INCR stores an integer that the client's

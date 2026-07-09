@@ -145,14 +145,12 @@ export async function POST(request: NextRequest) {
     resolvedIds = eligibleResolvedIds;
   }
 
-  const now = Date.now();
-  const positions: QueuePosition[] = [];
+  // Block gate (before ANY writes): if the participant is paused on any requested
+  // circuit (too many no-shows), reject the whole request up front — so a
+  // multi-circuit/tier request never partially queues them on earlier circuits
+  // before hitting a blocked one. Per-circuit; since circuits run in order this
+  // gates their whole run. 429 + Retry-After tells the client how long to wait.
   for (const circuitId of resolvedIds) {
-    // Block gate (before the lock): a participant who no-showed too many times on
-    // this circuit is paused from re-joining until the cooldown lifts, so a tab
-    // that will never respond stops being counted as a queue member. 429 +
-    // Retry-After tells the client how long to wait. Per-circuit; since circuits
-    // are done in order this gates their whole run.
     const noShow = noShowKey(config, circuitId, participantId);
     if ((await readCounter(noShow)) >= config.maxNoShows) {
       const retryAfterSeconds = await getLockTtlSeconds(noShow);
@@ -170,7 +168,11 @@ export async function POST(request: NextRequest) {
         },
       );
     }
+  }
 
+  const now = Date.now();
+  const positions: QueuePosition[] = [];
+  for (const circuitId of resolvedIds) {
     const lockKey = `${config.storage.manifestPath}:lock:${circuitId}`;
     const lockToken = crypto.randomUUID();
     const locked = await acquireLock(lockKey, lockToken);
@@ -203,12 +205,25 @@ export async function POST(request: NextRequest) {
         now,
       );
 
+      // Our POST is itself proof of life: if we are the current head, latch our
+      // claim BEFORE reconciling, so we can never be skipped as a no-show on our
+      // OWN request. Without this, an unclaimed-and-expired caller would be
+      // evicted by the reconcile below, then re-added and counted in this same
+      // request — letting the request that hits maxNoShows still re-queue them.
+      if (
+        circuit.queue[0]?.participantId === participantId &&
+        circuit.queue[0].claimedAt == null
+      ) {
+        circuit.queue[0].claimedAt = now;
+      }
+
       // Reconcile the front: skip a head that never claimed within the claim
       // window (a closed/dead tab), rotate a claimed-but-over-cap head to the
       // back, and stamp the head's clocks. Every caller (including waiters behind
       // the front) runs this under the lock and persists it, so a stuck/dead
       // leader is evicted by the people behind them. Evicted no-shows are counted
-      // below (after the write lands).
+      // below (after the write lands). The caller is never among them (claimed
+      // just above), so the count only ever charges OTHER participants.
       const circuitConfig = config.circuits.find((c) => c.id === circuitId);
       let evictedNoShowIds: string[] = [];
       if (circuitConfig) {
