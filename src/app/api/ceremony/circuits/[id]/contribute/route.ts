@@ -28,6 +28,8 @@ import {
   type ManifestState,
 } from "@/lib/ceremony-state";
 import { copyBinary, deleteBinary, putBinary } from "@/lib/blob-store";
+import { toOwnerReceipt } from "@/lib/public-receipt";
+import { buildCommittedZkeyPath } from "@/lib/zkey-path";
 import {
   acquireLock,
   deleteKey,
@@ -424,7 +426,7 @@ export async function POST(
     // commits, currentZkeyUrl points here, and two concurrent attempts from the
     // same participant must not clobber each other's blob. A rejected attempt
     // deletes its own; only a crash leaks one, which the orphan-GC reclaims.
-    const zkeyPath = `${config.storage.zkeyPrefix}/${id}/pending-${participantId}-${crypto.randomUUID()}.zkey`;
+    const zkeyPath = buildCommittedZkeyPath(config.storage.zkeyPrefix, id);
 
     let contribution: VerifiedContribution;
 
@@ -786,7 +788,7 @@ export async function POST(
 
       return NextResponse.json({
         success: true,
-        ...receipt,
+        ...toOwnerReceipt(receipt),
       });
     } finally {
       // Best-effort: a release can fail on a transient KV error, but the lock's
