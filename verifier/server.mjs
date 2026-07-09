@@ -8,19 +8,22 @@
 // snarkjs pairings run off the Vercel function.
 //
 // Signalling contract with the route (contribute/route.ts):
-//   200 {valid:true, ...mpcView} -> route commits. mpcView (csHash, count,
+//   200 {valid:true, ...mpcView}       -> route commits. mpcView (csHash, count,
 //        headHash, linkHash) is present when the caller supplied continuity
 //        anchors; the route runs its authoritative continuity gate on it.
-//   200 {valid:false}            -> route returns a non-consuming 400. This is a
-//        DEFINITIVE bad submission and now covers more than verifyChain=false:
-//        with anchors supplied it also means an unparseable zkey, a forged/short
-//        contribution count, a wrong circuit (csHash), or one that does not build
-//        on the recorded head (link mismatch) — all rejected before pairings.
-//   any non-2xx / error          -> route returns a non-consuming 503 (verify
-//        couldn't RUN).
-// {valid:false} is never turn-consuming; repeat grief is bounded by the route's
-// active-slot cap. Every infra fault (download failure, pin mismatch, crash) is a
-// 4xx/5xx, never {valid:false}.
+//   200 {valid:false, rejected:true}   -> DEFINITIVE participant fault, decided
+//        BEFORE pairings when anchors are supplied: an unparseable zkey, a
+//        forged/short contribution count, a wrong circuit (csHash), or one that
+//        does not build on the recorded head (link mismatch). The route CONSUMES
+//        the front-of-queue turn so it can't be replayed to hold the slot.
+//   200 {valid:false, rejected:false}  -> verifyChain returned false. Ambiguous
+//        (a worker infra fault is indistinguishable from an invalid chain), so
+//        the route does NOT consume the turn — the contributor keeps it and
+//        retries.
+//   any non-2xx / error                -> route returns a non-consuming 503
+//        (verify couldn't RUN).
+// Every infra fault (download failure, pin mismatch, crash) is a 4xx/5xx, never
+// {valid:false}.
 
 import { createServer } from "node:http";
 import { createHash, timingSafeEqual } from "node:crypto";
@@ -235,7 +238,9 @@ async function handleVerify(req, res) {
       mpc = await parseMpcParams(zkey, { maxContributions: expectedCount });
     } catch (error) {
       console.warn(`[verifier] mpc parse rejected: ${error?.message}`);
-      return json(res, 200, { valid: false });
+      // Definitive participant fault (not a parseable zkey / forged count) ->
+      // route consumes the front-of-queue turn.
+      return json(res, 200, { valid: false, rejected: true });
     }
     const count = mpc.contributions.length;
     const headHash = count >= 1 ? mpc.contributions[count - 1].hash() : null;
@@ -250,7 +255,9 @@ async function handleVerify(req, res) {
       console.warn(
         `[verifier] continuity pre-filter rejected: count=${count} expected=${expectedCount}`,
       );
-      return json(res, 200, { valid: false });
+      // Definitive participant fault (does not extend the recorded head) ->
+      // route consumes the front-of-queue turn.
+      return json(res, 200, { valid: false, rejected: true });
     }
     mpcView = { csHash: mpc.csHash, count, headHash, linkHash };
   }
@@ -270,7 +277,10 @@ async function handleVerify(req, res) {
   console.log(
     `[verifier] verify done valid=${valid} ms=${Date.now() - started} zkeyBytes=${zkey.length}`,
   );
-  if (!valid) return json(res, 200, { valid: false });
+  // verifyChain returns false on ANY failure, so a worker infra fault (OOM,
+  // /tmp full) is indistinguishable from an invalid chain: mark it non-consuming
+  // (rejected:false) so an honest contributor is not charged for a worker blip.
+  if (!valid) return json(res, 200, { valid: false, rejected: false });
   // Return the sha256 (so the route can record it without re-hashing) and, when
   // requested, the MPC view the route's continuity gate needs.
   return json(res, 200, { valid: true, zkeySha256: zkeyHash, ...(mpcView ?? {}) });

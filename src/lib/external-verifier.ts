@@ -42,7 +42,14 @@ export interface VerifyRemoteRequest {
 // the bytes itself. A discriminated union: the metadata exists ONLY on the valid
 // branch, so a caller cannot read a hash without first narrowing on `valid`.
 export type RemoteVerifyResult =
-  | { valid: false }
+  | {
+      valid: false;
+      // true  -> DEFINITIVE participant fault (unparseable / non-extending),
+      //          decided before pairings: the route consumes the turn.
+      // false -> verifyChain returned false (ambiguous infra-vs-invalid): the
+      //          route keeps the turn and lets the client retry.
+      rejected: boolean;
+    }
   | {
       valid: true;
       zkeySha256: string;
@@ -142,7 +149,10 @@ export async function verifyRemote(
     throw new Error("verifier returned a malformed response (no boolean valid)");
   }
   if (!data.valid) {
-    return { valid: false };
+    // rejected distinguishes a definitive participant fault (turn-consuming) from
+    // a verifyChain=false verdict (non-consuming). Default to false (the safe,
+    // non-consuming reading) if a caller/worker omits it.
+    return { valid: false, rejected: data.rejected === true };
   }
 
   // valid === true: the MPC view the route needs for continuity + the receipt

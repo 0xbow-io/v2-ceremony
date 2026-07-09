@@ -8,7 +8,7 @@ import {
 } from "@wonderland/cabure-crypto";
 
 import "@/lib/snarkjs-gc-guard";
-import { getCeremonyConfig } from "@/lib/ceremony-config";
+import { getCeremonyConfig, type CeremonyConfig } from "@/lib/ceremony-config";
 import { verifyRemote } from "@/lib/external-verifier";
 import { loadPtau } from "@/lib/ptau-loader";
 import { getParticipant } from "@/lib/participant-auth";
@@ -164,12 +164,64 @@ async function runContinuityGate(opts: {
   if (continuityError) {
     return rejectAndConsumeTurn(continuityError, 409);
   }
-  // count === headCount + 1 >= 1 once continuity passes, so headHash is always
-  // set; guard defensively rather than ever commit a null head.
+  // Continuity passing implies count === headCount + 1 >= 1, so headHash must be
+  // set. A null here is NOT the participant's fault — it means an internal
+  // inconsistency (a worker bug / malformed success that slipped past the client
+  // validation). Treat it as an infra fault: clean up and return a non-consuming
+  // 500 WITHOUT shifting the queue, so an honest turn is never charged for it.
   if (contribution.headHash === null) {
-    return rejectAndConsumeTurn("Contribution has no head hash.", 409);
+    await deleteBinary(contribution.storedUrl).catch(() => {});
+    return {
+      ok: false,
+      response: NextResponse.json(
+        { error: "Internal error finalizing the contribution. Please retry." },
+        { status: 500 },
+      ),
+    };
   }
   return { ok: true, serverContributionHash: contribution.headHash };
+}
+
+// Consume the front-of-queue turn for a submission the worker (or the fallback)
+// judged a DEFINITIVE participant fault before the commit lock — unparseable, or
+// one that does not extend the head. Briefly takes the per-circuit lock and
+// shifts the participant off ONLY if they are still at the front (so a race that
+// already rotated them never shifts someone else). Best-effort and NEVER throws:
+// a missed lock / KV error just skips the shift (the active-slot cap still bounds
+// grief), so a caller's 4xx is never turned into a 500. Takes its own lock; do
+// not call while holding it.
+async function consumeTurn(
+  config: CeremonyConfig,
+  id: string,
+  participantId: string,
+): Promise<void> {
+  const lockKey = `${config.storage.manifestPath}:lock:${id}`;
+  const lockToken = crypto.randomUUID();
+  try {
+    if (!(await acquireLock(lockKey, lockToken))) return;
+    try {
+      const circuit = await getCircuitState(id);
+      if (circuit.queue[0]?.participantId === participantId) {
+        circuit.queue.shift();
+        const consumed = await writeCircuitStateFenced({
+          lockKey,
+          lockToken,
+          circuitStateKey: kvKey(config.storage.circuitStatePrefix, id),
+          circuitState: circuit,
+        });
+        if (!consumed) {
+          console.warn(
+            "consumeTurn: lock lost, turn not consumed for circuit:",
+            id,
+          );
+        }
+      }
+    } finally {
+      await releaseLock(lockKey, lockToken).catch(() => {});
+    }
+  } catch (error) {
+    console.error("Failed to consume turn for circuit:", id, error);
+  }
 }
 
 function isValidPendingBlobUrl(url: string, circuitId: string): boolean {
@@ -409,6 +461,21 @@ export async function POST(
       }
       if (!remote.valid) {
         await deleteBinary(stored.url).catch(() => {});
+        if (remote.rejected) {
+          // Definitive participant fault (unparseable / non-extending), decided
+          // before pairings. Consume the front-of-queue turn so it can't be
+          // replayed to hold the slot until the active-slot cap rotates them.
+          await consumeTurn(config, id, participantId);
+          return NextResponse.json(
+            {
+              error:
+                "Contribution does not extend the current head or is not a valid zkey.",
+            },
+            { status: 409 },
+          );
+        }
+        // verifyChain=false: ambiguous (a worker infra fault is indistinguishable
+        // from an invalid chain), so keep the turn and let the client retry.
         return NextResponse.json(
           {
             error:
@@ -453,11 +520,34 @@ export async function POST(
       try {
         mpc = await parseMpcParams(body, { maxContributions });
       } catch {
+        // Definitive participant fault: consume the turn (matches the offload
+        // path's rejected:true).
+        await consumeTurn(config, id, participantId);
         await deleteBinary(blobUrl).catch(() => {});
         return NextResponse.json(
           { error: "Contribution is not a parseable zkey for this circuit." },
           { status: 400 },
         );
+      }
+
+      const count = mpc.contributions.length;
+      const headHash = count >= 1 ? mpc.contributions[count - 1].hash() : null;
+      const linkHash = count >= 2 ? mpc.contributions[count - 2].hash() : null;
+
+      // Cheap continuity pre-filter before the expensive verify (mirrors the
+      // worker's), so a non-extending upload is rejected without pairings and
+      // consumes the turn. Safe on the pre-check snapshot: the head cannot advance
+      // under a front-of-queue participant; the gate under the lock stays
+      // authoritative.
+      const preContinuityError = checkContinuity(precheck.circuit, {
+        csHash: mpc.csHash,
+        count,
+        linkHash,
+      });
+      if (preContinuityError) {
+        await consumeTurn(config, id, participantId);
+        await deleteBinary(blobUrl).catch(() => {});
+        return NextResponse.json({ error: preContinuityError }, { status: 409 });
       }
 
       if (mustVerify) {
@@ -515,15 +605,14 @@ export async function POST(
       // The client's pending upload has been copied to our path.
       await deleteBinary(blobUrl).catch(() => {});
 
-      const count = mpc.contributions.length;
       contribution = {
         storedUrl: stored.url,
         storedPathname: stored.pathname,
         computedHash,
         csHash: mpc.csHash,
         count,
-        headHash: count >= 1 ? mpc.contributions[count - 1].hash() : null,
-        linkHash: count >= 2 ? mpc.contributions[count - 2].hash() : null,
+        headHash,
+        linkHash,
       };
     }
 
