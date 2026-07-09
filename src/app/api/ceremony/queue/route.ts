@@ -1,14 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import {
-  advanceActiveSlot,
   getAllCircuitStates,
   getCircuitState,
   getManifest,
   getParticipantContributedCircuitIds,
   isCeremonyActive,
   kvKey,
+  noShowKey,
   pruneExpiredEntries,
+  reconcileFront,
   resolveMaxActiveSeconds,
   selectCircuitsForTier,
 } from "@/lib/ceremony-state";
@@ -21,6 +22,9 @@ import {
 import { getParticipant } from "@/lib/participant-auth";
 import {
   acquireLock,
+  getLockTtlSeconds,
+  incrementWithTtl,
+  readCounter,
   releaseLock,
   writeCircuitStateFenced,
 } from "@/lib/kv-store";
@@ -144,6 +148,29 @@ export async function POST(request: NextRequest) {
   const now = Date.now();
   const positions: QueuePosition[] = [];
   for (const circuitId of resolvedIds) {
+    // Block gate (before the lock): a participant who no-showed too many times on
+    // this circuit is paused from re-joining until the cooldown lifts, so a tab
+    // that will never respond stops being counted as a queue member. 429 +
+    // Retry-After tells the client how long to wait. Per-circuit; since circuits
+    // are done in order this gates their whole run.
+    const noShow = noShowKey(config, circuitId, participantId);
+    if ((await readCounter(noShow)) >= config.maxNoShows) {
+      const retryAfterSeconds = await getLockTtlSeconds(noShow);
+      const minutes = Math.max(1, Math.ceil(retryAfterSeconds / 60));
+      return NextResponse.json(
+        {
+          error: `You were skipped for not responding when your turn came, so you're paused on this circuit. Try again in about ${minutes} minute${minutes === 1 ? "" : "s"}.`,
+        },
+        {
+          status: 429,
+          headers:
+            retryAfterSeconds > 0
+              ? { "Retry-After": String(retryAfterSeconds) }
+              : undefined,
+        },
+      );
+    }
+
     const lockKey = `${config.storage.manifestPath}:lock:${circuitId}`;
     const lockToken = crypto.randomUUID();
     const locked = await acquireLock(lockKey, lockToken);
@@ -176,18 +203,22 @@ export async function POST(request: NextRequest) {
         now,
       );
 
-      // Enforce the hard active-slot cap: a front-runner who has held the slot
-      // past this circuit's cap is rotated to the back so the line advances even
-      // though their heartbeat keeps joinedAt fresh. Every caller (including
-      // participants waiting behind the front) runs this under the lock and
-      // persists it, so a stuck leader is evicted by the people behind them.
+      // Reconcile the front: skip a head that never claimed within the claim
+      // window (a closed/dead tab), rotate a claimed-but-over-cap head to the
+      // back, and stamp the head's clocks. Every caller (including waiters behind
+      // the front) runs this under the lock and persists it, so a stuck/dead
+      // leader is evicted by the people behind them. Evicted no-shows are counted
+      // below (after the write lands).
       const circuitConfig = config.circuits.find((c) => c.id === circuitId);
+      let evictedNoShowIds: string[] = [];
       if (circuitConfig) {
-        circuit.queue = advanceActiveSlot(
-          circuit.queue,
-          resolveMaxActiveSeconds(circuitConfig),
+        const result = reconcileFront(circuit.queue, {
           now,
-        );
+          claimWindowSeconds: config.claimWindowSeconds,
+          maxActiveSeconds: resolveMaxActiveSeconds(circuitConfig),
+        });
+        circuit.queue = result.queue;
+        evictedNoShowIds = result.evictedNoShowIds;
       }
 
       let index = circuit.queue.findIndex(
@@ -200,6 +231,15 @@ export async function POST(request: NextRequest) {
           joinedAt: now,
         });
         index = circuit.queue.length - 1;
+      }
+
+      // Latch our claim: ANY POST while we are the head proves we are alive, so we
+      // are not a no-show. The client fires a fast claim ping on reaching the
+      // front (the 90s heartbeat is too slow for the claim window). Latched once;
+      // afterwards the active-slot cap — not the claim window — governs, so a
+      // slow-but-live contributor is never skipped.
+      if (index === 0 && circuit.queue[0].claimedAt == null) {
+        circuit.queue[0].claimedAt = now;
       }
 
       // Fenced: the state blob also holds the contribution head, so a stale write
@@ -215,6 +255,16 @@ export async function POST(request: NextRequest) {
         return NextResponse.json(
           { error: "Circuit queue busy. Please retry." },
           { status: 409 },
+        );
+      }
+
+      // Count no-shows only after the eviction actually persisted (a lost-lock
+      // write returns above), so we never over-count. The per-circuit lock
+      // serializes callers, so a given no-show is counted once.
+      for (const evictedId of evictedNoShowIds) {
+        await incrementWithTtl(
+          noShowKey(config, circuitId, evictedId),
+          config.noShowCooldownSeconds,
         );
       }
 
@@ -266,22 +316,24 @@ export async function GET(request: NextRequest) {
   }
   const circuit = await getCircuitState(circuitId);
 
-  // Read-only: prune AND apply the active-slot cap in memory for an accurate
-  // position, but do NOT persist. Persisting would overwrite the whole
-  // circuit-state key and could revert a concurrent contribution commit. The
-  // POST and contribute paths do this under the lock and persist it, so this
-  // just mirrors what the caller's next heartbeat will make authoritative.
+  // Read-only: prune AND reconcile the front in memory for an accurate position,
+  // but do NOT persist (no counting of no-shows here either). Persisting would
+  // overwrite the whole circuit-state key and could revert a concurrent
+  // contribution commit. The POST and contribute paths reconcile under the lock
+  // and persist it, so this just mirrors what the caller's next claim/heartbeat
+  // will make authoritative — which is what advances the caller to position 1 and
+  // makes their client fire the contribution.
   const now = Date.now();
   const pruned = pruneExpiredEntries(
     circuit.queue,
     config.queueTimeoutSeconds,
     now,
   );
-  const active = advanceActiveSlot(
-    pruned,
-    resolveMaxActiveSeconds(knownCircuit),
+  const { queue: active } = reconcileFront(pruned, {
     now,
-  );
+    claimWindowSeconds: config.claimWindowSeconds,
+    maxActiveSeconds: resolveMaxActiveSeconds(knownCircuit),
+  });
 
   const index = active.findIndex(
     (entry) => entry.participantId === participantId,

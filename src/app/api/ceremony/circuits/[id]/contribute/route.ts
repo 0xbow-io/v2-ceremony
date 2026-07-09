@@ -13,14 +13,15 @@ import { verifyRemote } from "@/lib/external-verifier";
 import { loadPtau } from "@/lib/ptau-loader";
 import { getParticipant } from "@/lib/participant-auth";
 import {
-  advanceActiveSlot,
   computeChainHash,
   getCircuitState,
   getManifest,
   hasParticipantContributedToCircuit,
   isCircuitActive,
   kvKey,
+  noShowKey,
   pruneExpiredEntries,
+  reconcileFront,
   resolveMaxActiveSeconds,
   type CircuitState,
   type ContributionReceipt,
@@ -29,6 +30,7 @@ import {
 import { copyBinary, deleteBinary, putBinary } from "@/lib/blob-store";
 import {
   acquireLock,
+  deleteKey,
   releaseLock,
   writeCircuitStateFenced,
   writeContribution,
@@ -256,6 +258,7 @@ async function checkEligibility(
   manifest: ManifestState,
   targetContributions: number,
   queueTimeoutSeconds: number,
+  claimWindowSeconds: number,
   maxActiveSeconds: number,
 ): Promise<EligibilityResult> {
   const circuit = await getCircuitState(id);
@@ -264,12 +267,28 @@ async function checkEligibility(
     return { ok: false, error: "Ceremony is not active", status: 403 };
   }
 
-  circuit.queue = pruneExpiredEntries(circuit.queue, queueTimeoutSeconds);
-  // Apply the same active-slot cap the queue routes enforce, so a stuck leader
-  // who overstayed is rotated off here too and the real next participant passes
-  // the front-of-queue check. On the accept path this mutated queue is what
-  // writeContribution persists.
-  circuit.queue = advanceActiveSlot(circuit.queue, maxActiveSeconds);
+  const now = Date.now();
+  circuit.queue = pruneExpiredEntries(circuit.queue, queueTimeoutSeconds, now);
+  // Reaching submit IS proof of life, so latch our claim if we are the head
+  // before reconciling — otherwise the reconcile could skip a legitimate
+  // contributor as a no-show if their fast claim pings never landed but they
+  // still finished the (long) compute and got here.
+  if (
+    circuit.queue[0]?.participantId === participantId &&
+    circuit.queue[0].claimedAt == null
+  ) {
+    circuit.queue[0].claimedAt = now;
+  }
+  // Reconcile the front (skip a no-show head ahead, rotate an over-cap head,
+  // stamp clocks) so the real next participant passes the front check. On the
+  // accept path this mutated queue is what writeContribution persists. No-show
+  // counting is owned by the queue route, so evictions here are not counted.
+  const { queue } = reconcileFront(circuit.queue, {
+    now,
+    claimWindowSeconds,
+    maxActiveSeconds,
+  });
+  circuit.queue = queue;
 
   if (circuit.queue[0]?.participantId !== participantId) {
     return { ok: false, error: "Not at front of the queue", status: 409 };
@@ -353,6 +372,7 @@ export async function POST(
     manifest,
     circuitConfig.targetContributions,
     config.queueTimeoutSeconds,
+    config.claimWindowSeconds,
     resolveMaxActiveSeconds(circuitConfig),
   );
   if (!precheck.ok) {
@@ -648,6 +668,7 @@ export async function POST(
         lockedManifest,
         circuitConfig.targetContributions,
         config.queueTimeoutSeconds,
+        config.claimWindowSeconds,
         resolveMaxActiveSeconds(circuitConfig),
       );
       if (!eligible.ok) {
@@ -750,6 +771,11 @@ export async function POST(
       if (hadPriorContribution) {
         await deleteBinary(previousZkeyUrl).catch(() => {});
       }
+
+      // Clear any lingering no-show count for this participant on this circuit —
+      // they proved they are real by contributing. Best-effort (the cooldown TTL
+      // would clear it anyway); never fail a committed contribution over it.
+      await deleteKey(noShowKey(config, id, participantId)).catch(() => {});
 
       return NextResponse.json({
         success: true,

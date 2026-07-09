@@ -33,6 +33,31 @@ export async function getJsonMany<T>(keys: string[]): Promise<(T | null)[]> {
   return keys.map((_, index) => values[index] ?? null);
 }
 
+// Atomic counter with a sliding TTL, for the no-show tracker. INCR creates the
+// key at 1 on first use; the EXPIRE refreshes the window on every no-show, so the
+// block lasts noShowCooldownSeconds from the LAST no-show and then the key (and
+// the count) vanish on their own — that is the cooldown auto-lift.
+export async function incrementWithTtl(
+  key: string,
+  ttlSeconds: number,
+): Promise<number> {
+  const client = redis();
+  const count = await client.incr(key);
+  await client.expire(key, ttlSeconds);
+  return count;
+}
+
+// Current counter value (0 when absent). INCR stores an integer that the client's
+// deserializer parses back to a number.
+export async function readCounter(key: string): Promise<number> {
+  const value = await redis().get<number>(key);
+  return typeof value === "number" ? value : 0;
+}
+
+export async function deleteKey(key: string): Promise<void> {
+  await redis().del(key);
+}
+
 export async function setJson<T>(
   key: string,
   value: T,

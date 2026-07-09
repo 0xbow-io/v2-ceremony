@@ -39,6 +39,13 @@ export const ceremonyConfig: CeremonyConfig = {
   targetContributions: 500,
   endDate: "2026-08-01",
   queueTimeoutSeconds: 300,
+  // A front-runner must claim (fast liveness ping) within 30s of reaching the
+  // front or be skipped as a no-show. ~3 pings at a 10s cadence.
+  claimWindowSeconds: 30,
+  // Two no-shows on a circuit → temporarily blocked from re-joining it...
+  maxNoShows: 2,
+  // ...for 15 minutes, then it auto-lifts.
+  noShowCooldownSeconds: 900,
   verifyContributions: false,
   tiersEnabled: false,
   tiers: [
@@ -354,6 +361,7 @@ export const ceremonyConfig: CeremonyConfig = {
     participantContributionsPrefix: "ceremony:contributions:participants",
     participantsIndexPath: "ceremony:contributions:participants:index",
     zkeyPrefix: "ppv2-tsc-test/zkeys",
+    noShowPrefix: "ceremony:noshow",
   },
   copy: defaultCopy,
 };

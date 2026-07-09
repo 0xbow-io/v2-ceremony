@@ -3,13 +3,13 @@ import { handleUpload, type HandleUploadBody } from "@vercel/blob/client";
 
 import { getCeremonyConfig } from "@/lib/ceremony-config";
 import {
-  advanceActiveSlot,
   getAllCircuitStates,
   getCircuitState,
   getManifest,
   hasParticipantContributedToCircuit,
   isCeremonyActive,
   pruneExpiredEntries,
+  reconcileFront,
   resolveMaxActiveSeconds,
 } from "@/lib/ceremony-state";
 import { getParticipant } from "@/lib/participant-auth";
@@ -53,11 +53,15 @@ export async function POST(
           circuit.queue,
           config.queueTimeoutSeconds,
         );
-        // Mirror the active-slot cap so the upload-token gate agrees with the
-        // queue/contribute front check (read-only here; those paths persist it).
+        // Mirror the front reconcile so the upload-token gate agrees with the
+        // queue/contribute front check (read-only here; those paths persist it
+        // and own the no-show counting).
         const circuitConfig = config.circuits.find((c) => c.id === id);
         const active = circuitConfig
-          ? advanceActiveSlot(pruned, resolveMaxActiveSeconds(circuitConfig))
+          ? reconcileFront(pruned, {
+              claimWindowSeconds: config.claimWindowSeconds,
+              maxActiveSeconds: resolveMaxActiveSeconds(circuitConfig),
+            }).queue
           : pruned;
 
         if (active[0]?.participantId !== participant.participantId) {
