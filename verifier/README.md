@@ -7,7 +7,7 @@ unset it to fall back to in-process verify. See `src/lib/external-verifier.ts` a
 the `mustVerify` block in
 `src/app/api/ceremony/circuits/[id]/contribute/route.ts`.
 
-The worker holds no ceremony state, KV, or Blob credentials — every input is a
+The worker holds no ceremony state, KV, or Blob credentials; every input is a
 public Blob URL. It needs only its own auth.
 
 ## Why
@@ -20,7 +20,7 @@ small HTTPS call.
 
 ## Endpoint
 
-`POST /verify` — auth required (see below).
+`POST /verify`: auth required (see below).
 
 ```json
 {
@@ -64,11 +64,11 @@ named operators and pin the deployed image by digest.
 
 ## Enabling / disabling
 
-Controlled by one env var on the Vercel project — no code change:
+Controlled by one env var on the Vercel project, no code change:
 
 - **Enable:** set `CEREMONY_VERIFIER_URL` and deploy. Verifies run on the worker.
 - **Disable / roll back:** `vercel env rm CEREMONY_VERIFIER_URL production` and
-  redeploy — the route falls back to the in-process verifier that remains in the
+  redeploy. The route falls back to the in-process verifier that remains in the
   code. Or use Vercel Instant Rollback.
 
 Verification itself is mandatory in production regardless (`NODE_ENV ===
@@ -90,7 +90,7 @@ shared-secret header only (a public-URL fallback, or local testing).
 
 ## Infrastructure (provisioned in the v2 GCP project)
 
-- Cloud Run service — private, gen2, `concurrency=1` (one verify per instance),
+- Cloud Run service: private, gen2, `concurrency=1` (one verify per instance),
   request timeout well above the verify, one warm min-instance to keep the ptau
   cached, and a max-instances cap sized to worst-case concurrent circuits within
   the regional CPU quota.
@@ -117,6 +117,6 @@ Nothing here submits a contribution.
   `genesisUrl`/`genesisSha256`) / `currentZkeyUrl` (as `zkeyUrl`/`zkeySha256`).
   Expect `{valid:true}`; a wrong `zkeySha256` → 422; a wrong/absent token → 401.
 - **Route → worker (OIDC leg):** only works in the Vercel production runtime, so
-  validate it as a canary after deploy — perform one contribution and confirm a
+  validate it as a canary after deploy: perform one contribution and confirm a
   `[verifier] verify done valid=true …` line in
   `gcloud run services logs read ceremony-verifier`.

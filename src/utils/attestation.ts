@@ -56,7 +56,7 @@ export async function publishAttestation(
     body: JSON.stringify({
       filename,
       content: json,
-      description: `Caburé attestation — ${input.ceremony} / ${input.circuit} #${input.index}`,
+      description: `Caburé attestation: ${input.ceremony} / ${input.circuit} #${input.index}`,
     }),
   });
   if (response.status === 401) {
