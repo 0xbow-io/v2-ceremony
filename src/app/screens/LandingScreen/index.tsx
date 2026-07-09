@@ -7,6 +7,7 @@ import { useCeremonyStatus } from "@/hooks/useCeremonyStatus";
 import { useParticipant } from "@/hooks/useParticipant";
 import { useParticipantEligibility } from "@/hooks/useParticipantEligibility";
 import { getMyReceipts } from "@/lib/api";
+import { serializeOwnerReceipts } from "@/lib/public-receipt";
 import { cn } from "@/utils/cn";
 import { Button } from "@/app/components/Button";
 import { ScreenWrapper } from "@/app/components/ScreenWrapper";
@@ -69,7 +70,7 @@ export function LandingScreen({
     setDownloadingReceipts(true);
     try {
       const data = await getMyReceipts();
-      const payload = JSON.stringify(data.receipts, null, 2);
+      const payload = serializeOwnerReceipts(data.receipts);
       const blob = new Blob([payload], { type: "application/json" });
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");

@@ -2,9 +2,10 @@
 
 import { useState } from "react";
 import type { ReceiptResponse } from "@/lib/api";
+import { serializeOwnerReceipts } from "@/lib/public-receipt";
 
 export function useReceiptActions(options: {
-  receipts: ReceiptResponse[];
+  receipts: Array<ReceiptResponse & { clientHk: string }>;
   receiptFilename: string;
   shareTemplate: string;
 }) {
@@ -13,7 +14,9 @@ export function useReceiptActions(options: {
 
   const latestReceipt = receipts[receipts.length - 1];
   const receiptPayload =
-    receipts.length > 0 ? JSON.stringify(receipts, null, 2) : "";
+    receipts.length > 0
+      ? serializeOwnerReceipts(receipts, (receipt) => receipt.clientHk)
+      : "";
 
   const handleCopy = async () => {
     if (!receiptPayload) return;
