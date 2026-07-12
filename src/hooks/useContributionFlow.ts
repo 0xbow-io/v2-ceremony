@@ -438,7 +438,7 @@ export function useContributionFlow(options: {
         circuitId: currentCircuitId!,
         signal,
       }),
-    refetchInterval: 3_000,
+    refetchInterval: 6_000,
     enabled: queueEnabled,
     retry: false,
   });

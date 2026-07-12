@@ -3,7 +3,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { getStatus } from "@/lib/api";
 
-export function useCeremonyStatus(pollIntervalMs = 10_000) {
+export function useCeremonyStatus(pollIntervalMs = 20_000) {
   const { data: status, error } = useQuery({
     queryKey: ["ceremonyStatus"],
     queryFn: ({ signal }) => getStatus(signal),

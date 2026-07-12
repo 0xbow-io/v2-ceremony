@@ -12,7 +12,7 @@ export function useParticipantEligibility() {
     queryKey: ["participantEligibility", participantId],
     queryFn: ({ signal }) => getParticipantEligibility(signal),
     enabled: isAuthenticated,
-    refetchInterval: 10_000,
+    refetchInterval: 20_000,
   });
 
   return {
