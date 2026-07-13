@@ -5,6 +5,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import {
   ApiError,
+  CIRCUIT_TARGET_REACHED,
   getParticipantEligibility,
   getQueuePosition,
   getZkeyInfo,
@@ -13,6 +14,7 @@ import {
   uploadZkey,
   type ReceiptResponse,
 } from "@/lib/api";
+import { useCeremonyStatus } from "@/hooks/useCeremonyStatus";
 import type {
   CircuitRunItem,
   CircuitRunStatus,
@@ -176,6 +178,17 @@ export function useContributionFlow(options: {
   }, []);
 
   const contributionAbortRef = useRef<AbortController | null>(null);
+  // When a contribution is aborted because its circuit reached target (as
+  // opposed to a user cancel), this holds the circuit id to skip. The mutation's
+  // AbortError handler reads it to advance seamlessly instead of treating the
+  // abort as a plain cancel. Cleared on every fresh contribution and on cancel.
+  const pendingSkipRef = useRef<string | null>(null);
+
+  // Whether the circuit currently being worked has reached its target, learned
+  // from the app-wide ceremony status poll (React Query dedupes the query, so
+  // this adds no extra requests). Drives the early abort below. Completion is
+  // monotonic, so a true value here is never a false positive.
+  const { status: ceremonyStatus } = useCeremonyStatus();
 
   // --- Live ETA timing ---
   // Measures the user's actual throughput (circuit constraints processed per
@@ -210,6 +223,12 @@ export function useContributionFlow(options: {
   const currentCircuit = circuits.find(
     (circuit) => circuit.id === currentCircuitId,
   );
+  const currentCircuitComplete =
+    !!currentCircuitId &&
+    (ceremonyStatus?.circuits.some(
+      (circuit) => circuit.circuitId === currentCircuitId && circuit.isComplete,
+    ) ??
+      false);
 
   const updateCircuitRun = useCallback(
     (circuitId: string, patch: Partial<CircuitRunItem>) => {
@@ -229,6 +248,30 @@ export function useContributionFlow(options: {
     [updateCircuitRun],
   );
 
+  // Move the participant off a circuit that reached its target while they were
+  // waiting. No error is shown: the circuit is dropped from the run so the next
+  // one slides into the current slot, and if it was the last one left the flow
+  // finalizes. Driven by GET /queue returning `complete` (see the queue poll
+  // effect below). Idempotent — a no-op once the circuit is already gone.
+  const skipCompletedCircuit = useCallback(
+    (circuitId: string) => {
+      if (!activeCircuitIds.includes(circuitId)) return;
+      const remaining = activeCircuitIds.filter((id) => id !== circuitId);
+      setResolvedCircuitIds(remaining);
+      setCircuitRuns((prev) =>
+        prev.filter((circuit) => circuit.id !== circuitId),
+      );
+      // currentCircuitIndex is intentionally left as-is: dropping the entry at
+      // this index makes the next circuit take its place. If nothing remains
+      // at/after the pointer, every circuit the participant could do is done.
+      if (currentCircuitIndex >= remaining.length) {
+        entropySeed?.fill(0);
+        setFinalizeReady(true);
+      }
+    },
+    [activeCircuitIds, currentCircuitIndex, entropySeed],
+  );
+
   // --- Contribution mutation (download → compute → upload) ---
 
   const contributeMutation = useMutation({
@@ -237,6 +280,9 @@ export function useContributionFlow(options: {
 
       const controller = new AbortController();
       contributionAbortRef.current = controller;
+      // Fresh attempt: clear any stale skip marker so a later abort is only
+      // treated as a completion-skip if THIS attempt set it.
+      pendingSkipRef.current = null;
 
       markCircuitStatus(circuitId, "active");
       setContributionError(null);
@@ -284,13 +330,28 @@ export function useContributionFlow(options: {
       // and a compute longer than queueTimeoutSeconds would otherwise have aged our
       // entry out. Bumping joinedAt (see the queue POST) keeps it alive through
       // upload + verify.
+      let refresh: Awaited<ReturnType<typeof joinQueue>> | null = null;
       try {
-        await joinQueue({ circuitIds: [circuitId], signal: controller.signal });
+        refresh = await joinQueue({
+          circuitIds: [circuitId],
+          signal: controller.signal,
+        });
       } catch (error) {
         // If the user cancelled, re-throw so the mutation exits here. Otherwise the
         // next state update would flash the UI to "uploading" after a cancel. Any
         // other error is best-effort: a later step may be rejected and retried.
         if (controller.signal.aborted) throw error;
+      }
+      // The circuit filled up while we were computing. Skip the doomed upload +
+      // verify entirely: throw the same reason the submit path would, so the one
+      // onError handler advances us seamlessly with no error and no retry.
+      if (refresh?.completed?.includes(circuitId)) {
+        throw new ApiError(
+          "This circuit has already reached its contribution target.",
+          409,
+          null,
+          CIRCUIT_TARGET_REACHED,
+        );
       }
 
       setContributionPhase("uploading");
@@ -326,6 +387,7 @@ export function useContributionFlow(options: {
     },
     onSuccess: (receipt) => {
       const circuitId = receipt.circuitId;
+      pendingSkipRef.current = null;
 
       // Fold this circuit's real elapsed time + constraint weight into the
       // running totals that drive the ETA.
@@ -347,8 +409,33 @@ export function useContributionFlow(options: {
         setFinalizeReady(true);
       }
     },
-    onError: (error) => {
+    onError: (error, circuitId) => {
+      // Did WE abort this attempt because its circuit reached target? That is set
+      // just before aborting, and must be checked FIRST — before the error shape
+      // — because the abort surfaces differently by where it lands: an
+      // AbortError from a fetch, but a plain Error ("Contribution cancelled.")
+      // from the compute worker. Keying off our own marker (guarded to the still-
+      // current circuit) covers both. Advance seamlessly: no error, no retry.
+      const skipId = pendingSkipRef.current;
+      pendingSkipRef.current = null;
+      if (skipId && skipId === currentCircuitId) {
+        clearAutoRetry();
+        skipCompletedCircuit(skipId);
+        return;
+      }
+      // A plain user cancel (fetch AbortError) — nothing to surface.
       if (error.name === "AbortError") return;
+      // The circuit reached its target while we were mid-contribution but we did
+      // NOT pre-abort (the race where it filled between our refresh and the
+      // submit). Detected at the post-compute refresh, the upload token, or the
+      // submit via the machine-readable reason. Advance to the next open circuit
+      // with no error and WITHOUT spending the retry budget — a recompute would
+      // just be refused again. Same skip path the queue poll uses when waiting.
+      if (error instanceof ApiError && error.reason === CIRCUIT_TARGET_REACHED) {
+        clearAutoRetry();
+        skipCompletedCircuit(circuitId);
+        return;
+      }
       const message = error instanceof Error ? error.message : String(error);
       // A 429 means our per-participant verify slot is still held (commonly a
       // prior attempt that died before releasing it). Wait the lock out instead
@@ -374,6 +461,20 @@ export function useContributionFlow(options: {
       autoRetryOrSurface(message, "contribution");
     },
   });
+
+  // Early abort: the moment the circuit we're computing reaches its target (seen
+  // via the shared status poll), stop the doomed work instead of finishing it
+  // and being rejected at submit. This matters more now the active-slot cap is
+  // shorter — a slow contributor is likelier to be rotated off the front while
+  // still computing. We mark the skip, abort the controller (the mutation throws
+  // AbortError → onError advances us), and rely on completion being monotonic so
+  // this can never abort a contribution that was still valid.
+  useEffect(() => {
+    if (!contributeMutation.isPending || !currentCircuitId) return;
+    if (!currentCircuitComplete) return;
+    pendingSkipRef.current = currentCircuitId;
+    contributionAbortRef.current?.abort();
+  }, [currentCircuitComplete, contributeMutation.isPending, currentCircuitId]);
 
   // --- Rejoin mutation ---
 
@@ -442,6 +543,20 @@ export function useContributionFlow(options: {
     enabled: queueEnabled,
     retry: false,
   });
+
+  // GET /queue returns either a live position or, once the circuit has reached
+  // its target, `{ complete: true }`. Normalize both shapes so the effects below
+  // can treat "complete" as "advance to the next circuit" and a position as
+  // "keep waiting / contribute at the front".
+  const queueData = queueQuery.data;
+  const queueCircuitComplete =
+    !!queueData && "complete" in queueData && queueData.complete === true;
+  const queuePosition =
+    queueData && "position" in queueData ? queueData.position : undefined;
+  const queueEstimatedWaitSeconds =
+    queueData && "estimatedWaitSeconds" in queueData
+      ? queueData.estimatedWaitSeconds
+      : undefined;
 
   // Restart the current circuit from the queue: clear the error, mark the
   // circuit waiting and reset the queue query so polling re-triggers the
@@ -519,20 +634,36 @@ export function useContributionFlow(options: {
 
   // Update circuit run with latest queue position
   useEffect(() => {
-    if (!queueQuery.data || !currentCircuitId) return;
+    if (!currentCircuitId) return;
+    // The circuit filled up while we were in line: seamlessly move on to the
+    // next open circuit rather than surfacing an error or waiting for a turn
+    // that can never come.
+    if (queueCircuitComplete) {
+      skipCompletedCircuit(currentCircuitId);
+      return;
+    }
+    if (queuePosition == null) return;
     updateCircuitRun(currentCircuitId, {
-      position: queueQuery.data.position,
-      etaSeconds: queueQuery.data.estimatedWaitSeconds,
+      position: queuePosition,
+      etaSeconds: queueEstimatedWaitSeconds,
     });
     setQueueError(null);
     // A successful poll that leaves us waiting in line (position > 1) means a
     // transient queue error recovered, so drop the auto-retry indicator and the
     // attempt counter. At position 1 the contribution is about to (re)run, so
     // keep the indicator until that attempt resolves (onSuccess / onError).
-    if (queueQuery.data.position !== 1) {
+    if (queuePosition !== 1) {
       clearAutoRetry();
     }
-  }, [queueQuery.data, currentCircuitId, updateCircuitRun, clearAutoRetry]);
+  }, [
+    queueCircuitComplete,
+    queuePosition,
+    queueEstimatedWaitSeconds,
+    currentCircuitId,
+    skipCompletedCircuit,
+    updateCircuitRun,
+    clearAutoRetry,
+  ]);
 
   // Trigger contribution when at position 1.
   // isPending is intentionally omitted from deps: including it would cause
@@ -540,7 +671,7 @@ export function useContributionFlow(options: {
   // while position is still 1). On success, currentCircuitId advances.
   useEffect(() => {
     if (
-      queueQuery.data?.position === 1 &&
+      queuePosition === 1 &&
       !contributeMutation.isPending &&
       currentCircuitId &&
       !finalizeReady
@@ -548,7 +679,7 @@ export function useContributionFlow(options: {
       contributeMutation.mutate(currentCircuitId);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [queueQuery.data?.position, currentCircuitId, finalizeReady]);
+  }, [queuePosition, currentCircuitId, finalizeReady]);
 
   // Handle "not in queue" errors by rejoining.
   // isPending is intentionally omitted: including it would cause infinite
@@ -620,8 +751,7 @@ export function useContributionFlow(options: {
   // these and is skipped. Bounded so a long compute isn't flooded with POSTs
   // (once latched, further pings are redundant — the active-slot cap governs).
   useEffect(() => {
-    const atFront =
-      queueQuery.data?.position === 1 || contributeMutation.isPending;
+    const atFront = queuePosition === 1 || contributeMutation.isPending;
     // Fresh entry into the front (including after being rotated to the back and
     // cycling around, or moving to a new circuit) starts a new front turn, so
     // refill the ping budget. Must run before the budget guard below.
@@ -661,7 +791,7 @@ export function useContributionFlow(options: {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
-    queueQuery.data?.position,
+    queuePosition,
     contributeMutation.isPending,
     flowActive,
     currentCircuitId,
@@ -776,6 +906,9 @@ export function useContributionFlow(options: {
   };
 
   const cancel = () => {
+    // Clear the skip marker BEFORE aborting so this user cancel isn't mistaken
+    // for a completion-skip in the mutation's AbortError handler.
+    pendingSkipRef.current = null;
     entropySeed?.fill(0);
     contributionAbortRef.current?.abort();
     contributeMutation.reset();
@@ -783,6 +916,7 @@ export function useContributionFlow(options: {
   };
 
   const resetState = () => {
+    pendingSkipRef.current = null;
     setCircuitRuns([]);
     setResolvedCircuitIds([]);
     setQueueError(null);

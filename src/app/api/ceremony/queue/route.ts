@@ -131,19 +131,35 @@ export async function POST(request: NextRequest) {
   });
 
   if (eligibleResolvedIds.length === 0) {
-    const fallbackCircuitId = config.circuits.find(isCircuitEligible)?.id;
-
-    if (!fallbackCircuitId) {
+    // None of the requested circuits are still open for this participant. Do NOT
+    // reassign them to an arbitrary still-open circuit: their client isn't
+    // polling it, so they'd sit at its front without claiming and get evicted as
+    // a no-show (and, after enough of those, blocked from a circuit they may
+    // actually need). If they still have eligible circuits, their client
+    // advances to them on its own (each completed circuit returns `complete` from
+    // GET /queue); only when nothing is eligible anywhere are they truly done.
+    const hasEligibleElsewhere = config.circuits.some(isCircuitEligible);
+    if (!hasEligibleElsewhere) {
       return NextResponse.json(
         { error: "You have already contributed to every available circuit." },
         { status: 403 },
       );
     }
-
-    resolvedIds = [fallbackCircuitId];
-  } else {
-    resolvedIds = eligibleResolvedIds;
+    // Tell the client which of the requested circuits are complete (target
+    // reached), distinct from ones it simply already contributed to. The client
+    // uses this to skip early — e.g. a heartbeat/refresh POST fired right after a
+    // long compute learns the circuit filled up and skips the doomed upload +
+    // verify instead of paying for them only to be rejected.
+    const completed = resolvedIds.filter((circuitId) => {
+      const circuitConfig = config.circuits.find((c) => c.id === circuitId);
+      const circuit = allCircuits.find((s) => s.id === circuitId);
+      return circuitConfig && circuit
+        ? circuit.totalContributions >= circuitConfig.targetContributions
+        : false;
+    });
+    return NextResponse.json({ positions: [], completed });
   }
+  resolvedIds = eligibleResolvedIds;
 
   // Block gate (before ANY writes): if the participant is paused on any requested
   // circuit (too many no-shows), reject the whole request up front — so a
@@ -330,6 +346,16 @@ export async function GET(request: NextRequest) {
     );
   }
   const circuit = await getCircuitState(circuitId);
+
+  // The circuit reached its target while this participant was waiting. Tell the
+  // client to move on instead of holding them in a line that will never advance:
+  // no contribution can be accepted here anymore (isCircuitActive is false), so a
+  // position would only lead to a rejected submit. The client treats this as
+  // "skip to the next open circuit", not an error. Checked before the position
+  // logic so it fires whether or not they are still in the (now cleared) queue.
+  if (circuit.totalContributions >= knownCircuit.targetContributions) {
+    return NextResponse.json({ circuitId, complete: true });
+  }
 
   // Read-only: prune AND reconcile the front in memory for an accurate position,
   // but do NOT persist (no counting of no-shows here either). Persisting would

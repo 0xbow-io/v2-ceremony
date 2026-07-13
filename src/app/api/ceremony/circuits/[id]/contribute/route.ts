@@ -244,7 +244,13 @@ function isValidPendingBlobUrl(url: string, circuitId: string): boolean {
 
 type EligibilityResult =
   | { ok: true; circuit: CircuitState }
-  | { ok: false; error: string; status: number };
+  | { ok: false; error: string; status: number; reason?: string };
+
+// Machine-readable reason a contribution/upload/join was refused because the
+// circuit already hit its target. The client treats this as a seamless skip to
+// the next open circuit — never an error, never a retry (a recompute would just
+// be refused again). Mirrored in the client (see useContributionFlow).
+const CIRCUIT_TARGET_REACHED = "CIRCUIT_TARGET_REACHED";
 
 // Shared eligibility gate. Run once cheaply before the heavy verify/upload (so
 // a clearly ineligible request never pays for them) and again under the lock,
@@ -264,6 +270,20 @@ async function checkEligibility(
   const circuit = await getCircuitState(id);
 
   if (!isCircuitActive(manifest, circuit, targetContributions)) {
+    // Distinguish "this circuit filled up" from "the whole ceremony is sealed".
+    // A full circuit is a seamless skip for the client, not an error — and this
+    // is checked before the front-of-queue check below, so a contributor who was
+    // rotated off the front while computing (likelier now the active-slot cap is
+    // shorter) still gets the accurate reason instead of a misleading "not at
+    // front" after finishing expensive work.
+    if (circuit.totalContributions >= targetContributions) {
+      return {
+        ok: false,
+        error: "This circuit has already reached its contribution target.",
+        status: 409,
+        reason: CIRCUIT_TARGET_REACHED,
+      };
+    }
     return { ok: false, error: "Ceremony is not active", status: 403 };
   }
 
@@ -385,7 +405,7 @@ export async function POST(
   if (!precheck.ok) {
     await deleteBinary(blobUrl).catch(() => {});
     return NextResponse.json(
-      { error: precheck.error },
+      { error: precheck.error, reason: precheck.reason },
       { status: precheck.status },
     );
   }
@@ -681,7 +701,7 @@ export async function POST(
       if (!eligible.ok) {
         await deleteBinary(contribution.storedUrl).catch(() => {});
         return NextResponse.json(
-          { error: eligible.error },
+          { error: eligible.error, reason: eligible.reason },
           { status: eligible.status },
         );
       }
@@ -726,6 +746,15 @@ export async function POST(
       circuit.latestContributionHash = contribution.computedHash;
       circuit.chainHash = chainHash;
       circuit.queue.shift();
+      // If this contribution just reached the target, the circuit can accept no
+      // more (isCircuitActive is now false). Drop everyone still waiting so we
+      // don't leave a permanent ghost queue on a done circuit — their clients are
+      // told to move on by GET /queue's `complete` signal. Without this the queue
+      // is never pruned again (no write path touches a full circuit) and the
+      // status dashboard shows waiters on a completed circuit forever.
+      if (circuit.totalContributions >= circuitConfig.targetContributions) {
+        circuit.queue = [];
+      }
       circuit.currentZkeyPath = contribution.storedPathname;
       circuit.currentZkeyUrl = contribution.storedUrl;
       // Advance the continuity head: totalContributions (incremented above) is the

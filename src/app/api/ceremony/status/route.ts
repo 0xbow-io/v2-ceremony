@@ -15,18 +15,25 @@ export async function GET() {
   const circuitStatuses = circuits.map((circuit) => {
     const circuitConfig = config.circuits.find((c) => c.id === circuit.id);
     const target = circuitConfig?.targetContributions ?? 0;
+    const isComplete = circuit.totalContributions >= target;
     return {
       circuitId: circuit.id,
       targetContributions: target,
       totalContributions: circuit.totalContributions,
       // Whether a circuit has an active contributor — NOT who. Was the front's
       // participantId (a github:<id> resolvable to a real profile); now a
-      // non-identifying sentinel so consumers keep their active/waiting signal.
-      currentParticipant: circuit.queue[0] ? "active" : null,
-      queueLength: circuit.queue.length,
+      // non-identifying sentinel so consumers keep their active/waiting signal. A
+      // completed circuit has no active contributor even if a stale entry lingers
+      // in state.
+      currentParticipant: !isComplete && circuit.queue[0] ? "active" : null,
+      // A completed circuit accepts no contributions, so its queue is meaningless
+      // — report 0 rather than any stale entries left from before it filled (the
+      // contribute path clears them going forward, but older completed circuits
+      // may still carry a frozen queue that no write path prunes).
+      queueLength: isComplete ? 0 : circuit.queue.length,
       latestContributionHash: circuit.latestContributionHash,
       chainHash: circuit.chainHash,
-      isComplete: circuit.totalContributions >= target,
+      isComplete,
     };
   });
 

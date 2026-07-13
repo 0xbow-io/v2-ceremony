@@ -46,6 +46,16 @@ export interface QueuePosition {
   estimatedWaitSeconds: number;
 }
 
+// GET /queue returns this instead of a position when the circuit reached its
+// target while the participant was waiting. The client advances to the next open
+// circuit rather than waiting for a turn that can never come — not an error.
+export interface QueueCircuitComplete {
+  circuitId: string;
+  complete: true;
+}
+
+export type QueuePositionResult = QueuePosition | QueueCircuitComplete;
+
 export interface ReceiptResponse {
   success: boolean;
   circuitId: string;
@@ -69,22 +79,33 @@ export interface ZkeyInfo {
   hash: string | null;
 }
 
-// Error that preserves the HTTP status and Retry-After so callers can react to
-// specific responses (e.g. back off on a 429) instead of only seeing a message
-// string. Extends Error, so existing `error.message` handling is unaffected.
+// Machine-readable reason a circuit refused work because it already hit its
+// target. Boundaries (queue/upload/contribute) send this so the client can skip
+// to the next open circuit seamlessly instead of surfacing an error or retrying
+// a contribution that would just be refused again. Kept in sync with the server
+// routes.
+export const CIRCUIT_TARGET_REACHED = "CIRCUIT_TARGET_REACHED";
+
+// Error that preserves the HTTP status, Retry-After, and any machine-readable
+// `reason` so callers can react to specific responses (e.g. back off on a 429,
+// or skip on a completed circuit) instead of only seeing a message string.
+// Extends Error, so existing `error.message` handling is unaffected.
 export class ApiError extends Error {
   readonly status: number;
   readonly retryAfterSeconds: number | null;
+  readonly reason: string | null;
 
   constructor(
     message: string,
     status: number,
     retryAfterSeconds: number | null,
+    reason: string | null = null,
   ) {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.retryAfterSeconds = retryAfterSeconds;
+    this.reason = reason;
   }
 }
 
@@ -107,16 +128,20 @@ async function apiFetch<T>(
     // useless to the user and hideous when rendered, so never surface it; fall
     // back to the status code instead.
     let message: string | undefined;
+    let reason: string | null = null;
     if (contentType.includes("application/json")) {
       const body = (await response.json().catch(() => null)) as {
         error?: string;
+        reason?: string;
       } | null;
       message = body?.error;
+      reason = body?.reason ?? null;
     }
     throw new ApiError(
       message || `Request failed with status ${response.status}.`,
       response.status,
       parseRetryAfter(response.headers.get("Retry-After")),
+      reason,
     );
   }
 
@@ -158,14 +183,15 @@ export async function joinQueue(options: {
   tierId?: string;
   circuitIds?: string[];
   signal?: AbortSignal;
-}): Promise<{ positions: QueuePosition[] }> {
+}): Promise<{ positions: QueuePosition[]; completed?: string[] }> {
   const payload: Record<string, unknown> = {};
   if (options.tierId) {
     payload.tierId = options.tierId;
   } else if (options.circuitIds) {
     payload.circuitIds = options.circuitIds;
   }
-  return await apiFetch<{ positions: QueuePosition[] }>("/api/ceremony/queue", {
+  return await apiFetch<{ positions: QueuePosition[]; completed?: string[] }>(
+    "/api/ceremony/queue", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -176,11 +202,11 @@ export async function joinQueue(options: {
 export async function getQueuePosition(options: {
   circuitId: string;
   signal?: AbortSignal;
-}): Promise<QueuePosition> {
+}): Promise<QueuePositionResult> {
   const params = new URLSearchParams({
     circuitId: options.circuitId,
   });
-  return await apiFetch<QueuePosition>(
+  return await apiFetch<QueuePositionResult>(
     `/api/ceremony/queue?${params.toString()}`,
     { signal: options.signal },
   );
