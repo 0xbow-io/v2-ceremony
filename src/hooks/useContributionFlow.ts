@@ -178,6 +178,11 @@ export function useContributionFlow(options: {
   }, []);
 
   const contributionAbortRef = useRef<AbortController | null>(null);
+  // The completed circuit whose durable server-side handoff should be drained
+  // before joining the next one. Carried on queue POSTs so status-driven skips
+  // (which may happen without a final GET /queue) still trigger request-driven
+  // migration on Vercel.
+  const handoffSourceRef = useRef<string | null>(null);
   // When a contribution is aborted because its circuit reached target (as
   // opposed to a user cancel), this holds the circuit id to skip. The mutation's
   // AbortError handler reads it to advance seamlessly instead of treating the
@@ -257,6 +262,7 @@ export function useContributionFlow(options: {
     (circuitId: string) => {
       if (!activeCircuitIds.includes(circuitId)) return;
       const remaining = activeCircuitIds.filter((id) => id !== circuitId);
+      handoffSourceRef.current = circuitId;
       setResolvedCircuitIds(remaining);
       setCircuitRuns((prev) =>
         prev.filter((circuit) => circuit.id !== circuitId),
@@ -270,6 +276,25 @@ export function useContributionFlow(options: {
       }
     },
     [activeCircuitIds, currentCircuitIndex, entropySeed],
+  );
+
+  const joinCircuitQueue = useCallback(
+    async (circuitId: string, signal?: AbortSignal) => {
+      const index = activeCircuitIds.indexOf(circuitId);
+      const result = await joinQueue({
+        circuitIds: [circuitId],
+        remainingCircuitIds:
+          index >= 0 ? activeCircuitIds.slice(index + 1) : [],
+        handoffFromCircuitId: handoffSourceRef.current ?? undefined,
+        signal,
+      });
+      // The source outbox is durable even if its drain hit a lock. Once this
+      // participant successfully joins, other clients/requests can continue any
+      // remaining drain without making every heartbeat re-read the old source.
+      handoffSourceRef.current = null;
+      return result;
+    },
+    [activeCircuitIds],
   );
 
   // --- Contribution mutation (download → compute → upload) ---
@@ -332,10 +357,7 @@ export function useContributionFlow(options: {
       // upload + verify.
       let refresh: Awaited<ReturnType<typeof joinQueue>> | null = null;
       try {
-        refresh = await joinQueue({
-          circuitIds: [circuitId],
-          signal: controller.signal,
-        });
+        refresh = await joinCircuitQueue(circuitId, controller.signal);
       } catch (error) {
         // If the user cancelled, re-throw so the mutation exits here. Otherwise the
         // next state update would flash the UI to "uploading" after a cancel. Any
@@ -484,7 +506,7 @@ export function useContributionFlow(options: {
   const rejoinMutation = useMutation({
     mutationFn: async () => {
       if (!currentCircuitId) return { positions: [] };
-      return await joinQueue({ circuitIds: [currentCircuitId] });
+      return await joinCircuitQueue(currentCircuitId);
     },
     onSuccess: (result) => {
       if (!currentCircuitId) return;
@@ -506,9 +528,25 @@ export function useContributionFlow(options: {
       setQueueError(null);
     },
     onError: (error) => {
+      // A queue-lock collision is expected when a whole completed queue reaches
+      // the next circuit together. Never turn it into a manual error that stops
+      // polling and heartbeats; React Query retries it with jitter below.
+      if (error instanceof ApiError && error.status === 409) return;
       const message = error instanceof Error ? error.message : String(error);
       setQueueError(message);
     },
+    retry: (failureCount, error) => {
+      // Per-circuit locks expire after 60s. Keep this transient recovery alive
+      // beyond that bound so a timed-out Vercel invocation cannot strand the UI
+      // until the much slower heartbeat runs.
+      return (
+        error instanceof ApiError &&
+        error.status === 409 &&
+        failureCount < 18
+      );
+    },
+    retryDelay: (attempt) =>
+      Math.min(500 * 2 ** attempt, 5_000) + Math.random() * 500,
   });
 
   // --- Queue position query (auto-polling) ---
@@ -730,7 +768,7 @@ export function useContributionFlow(options: {
       return;
     let cancelled = false;
     const beat = () => {
-      joinQueue({ circuitIds: [currentCircuitId] }).catch(() => {
+      joinCircuitQueue(currentCircuitId).catch(() => {
         /* best-effort; poll/rejoin recovers a dropped slot */
       });
     };
@@ -742,7 +780,13 @@ export function useContributionFlow(options: {
       cancelled = true;
       clearInterval(timer);
     };
-  }, [flowActive, currentCircuitId, finalizeReady, blockedOnManualError]);
+  }, [
+    flowActive,
+    currentCircuitId,
+    finalizeReady,
+    blockedOnManualError,
+    joinCircuitQueue,
+  ]);
 
   // Fast claim ping. Once we reach the FRONT (or are actively contributing), POST
   // /queue every ~10s — but only CLAIM_MAX_PINGS times — so the server latches
@@ -773,7 +817,7 @@ export function useContributionFlow(options: {
     const claim = () => {
       if (cancelled || claimPingsRef.current >= CLAIM_MAX_PINGS) return;
       claimPingsRef.current += 1;
-      joinQueue({ circuitIds: [currentCircuitId] }).catch(() => {
+      joinCircuitQueue(currentCircuitId).catch(() => {
         /* best-effort; the heartbeat and later POSTs also latch the claim */
       });
     };
@@ -797,6 +841,7 @@ export function useContributionFlow(options: {
     currentCircuitId,
     finalizeReady,
     blockedOnManualError,
+    joinCircuitQueue,
   ]);
 
   // --- Actions (same public API) ---
@@ -867,7 +912,10 @@ export function useContributionFlow(options: {
     // Join only the first circuit for an immediate position. The heartbeat effect
     // also (re)joins it, so a failure here is non-fatal — the poll recovers it.
     try {
-      const result = await joinQueue({ circuitIds: [resolved[0]] });
+      const result = await joinQueue({
+        circuitIds: [resolved[0]],
+        remainingCircuitIds: resolved.slice(1),
+      });
       // The server is authoritative about which circuit it actually queued us on:
       // if resolved[0] went ineligible between our eligibility read and this join,
       // it falls back to a different eligible circuit. Follow it — make that the
@@ -909,6 +957,7 @@ export function useContributionFlow(options: {
     // Clear the skip marker BEFORE aborting so this user cancel isn't mistaken
     // for a completion-skip in the mutation's AbortError handler.
     pendingSkipRef.current = null;
+    handoffSourceRef.current = null;
     entropySeed?.fill(0);
     contributionAbortRef.current?.abort();
     contributeMutation.reset();
@@ -917,6 +966,7 @@ export function useContributionFlow(options: {
 
   const resetState = () => {
     pendingSkipRef.current = null;
+    handoffSourceRef.current = null;
     setCircuitRuns([]);
     setResolvedCircuitIds([]);
     setQueueError(null);

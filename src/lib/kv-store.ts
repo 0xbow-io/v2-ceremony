@@ -101,6 +101,19 @@ export async function setMembers(key: string): Promise<string[]> {
   return await redis().smembers(key);
 }
 
+// Batch-read Redis sets in one REST round trip. Queue handoff resolution needs
+// each waiting participant's contributed-circuit set; pipelining avoids one HTTP
+// request per participant while preserving the same SMEMBERS semantics.
+export async function setMembersMany(keys: string[]): Promise<string[][]> {
+  if (keys.length === 0) return [];
+  const pipeline = redis().pipeline();
+  for (const key of keys) {
+    pipeline.smembers(key);
+  }
+  const values = await pipeline.exec<string[][]>();
+  return keys.map((_, index) => values[index] ?? []);
+}
+
 export async function listClear(key: string): Promise<number> {
   return redis().del(key);
 }

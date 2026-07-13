@@ -63,6 +63,23 @@ export interface QueueEntry {
   // exposes it only while this entry is the active slot, so consumers can tell
   // contributors apart — and follow one across circuits — without identifying them.
   publicToken?: string;
+  // Server-validated remainder of this participant's run. Persisting it on the
+  // queue entry lets a completed circuit hand the participant to the correct
+  // next circuit without depending on an online browser. Older entries omit it
+  // and fall back to ceremony-config order during handoff.
+  remainingCircuitIds?: string[];
+  // A server-side handoff may place the entry at the next circuit before a
+  // background tab observes the transition. Defer the no-show claim clock until
+  // this grace point so transferred participants are not immediately evicted.
+  handoffGraceUntil?: number;
+}
+
+export interface QueueHandoff {
+  id: string;
+  createdAt: number;
+  // Entries not yet durably observed in a destination queue. Destination writes
+  // dedupe by participantId, so reprocessing after a Vercel timeout is safe.
+  entries: QueueEntry[];
 }
 
 export interface CircuitState {
@@ -71,6 +88,10 @@ export interface CircuitState {
   latestContributionHash: string | null;
   chainHash: string;
   queue: QueueEntry[];
+  // Durable outbox created atomically with the contribution that fills this
+  // circuit. Request-driven Vercel functions drain it into later circuits; it is
+  // removed only after every entry is migrated or has no eligible destination.
+  pendingHandoff?: QueueHandoff;
   currentZkeyPath: string;
   currentZkeyUrl: string;
   // Genesis zkey, pinned at init and never overwritten. Lets the contribution
@@ -497,7 +518,14 @@ export function reconcileFront(
 
   const front = next[0];
   if (front && front.activeSince != null) {
-    if (front.claimedAt == null && now - front.activeSince > claimWindowMs) {
+    const claimClockStartedAt = Math.max(
+      front.activeSince,
+      front.handoffGraceUntil ?? 0,
+    );
+    if (
+      front.claimedAt == null &&
+      now - claimClockStartedAt > claimWindowMs
+    ) {
       // No-show: reached the front but never proved it is alive. Remove it (a
       // closed tab gets no rotation) and report it for the no-show counter.
       evictedNoShowIds.push(front.participantId);

@@ -184,6 +184,8 @@ export async function getMyReceipts(
 export async function joinQueue(options: {
   tierId?: string;
   circuitIds?: string[];
+  remainingCircuitIds?: string[];
+  handoffFromCircuitId?: string;
   signal?: AbortSignal;
 }): Promise<{ positions: QueuePosition[]; completed?: string[] }> {
   const payload: Record<string, unknown> = {};
@@ -191,6 +193,12 @@ export async function joinQueue(options: {
     payload.tierId = options.tierId;
   } else if (options.circuitIds) {
     payload.circuitIds = options.circuitIds;
+  }
+  if (options.remainingCircuitIds !== undefined) {
+    payload.remainingCircuitIds = options.remainingCircuitIds;
+  }
+  if (options.handoffFromCircuitId) {
+    payload.handoffFromCircuitId = options.handoffFromCircuitId;
   }
   return await apiFetch<{ positions: QueuePosition[]; completed?: string[] }>(
     "/api/ceremony/queue", {

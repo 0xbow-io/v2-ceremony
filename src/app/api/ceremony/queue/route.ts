@@ -22,6 +22,7 @@ import {
   type TierId,
 } from "@/lib/ceremony-config";
 import { getParticipant } from "@/lib/participant-auth";
+import { drainCircuitHandoff } from "@/lib/queue-handoff";
 import {
   acquireLock,
   getJson,
@@ -54,9 +55,132 @@ export async function POST(request: NextRequest) {
   const payload = (await request.json()) as {
     tierId?: TierId;
     circuitIds?: string[];
+    remainingCircuitIds?: string[];
+    handoffFromCircuitId?: string;
   };
 
   const config = getCeremonyConfig();
+  const maxCircuitIds = config.circuits.length;
+
+  // Bound and normalize client-controlled circuit lists before any KV work or
+  // iteration over their contents. A legitimate request cannot name more
+  // distinct circuits than the ceremony contains; rejecting oversized raw
+  // arrays also prevents duplicate ids from amplifying lookup/lock work.
+  let requestedCircuitIds: string[] | undefined;
+  if (payload.circuitIds !== undefined) {
+    if (!Array.isArray(payload.circuitIds)) {
+      return NextResponse.json(
+        { error: "circuitIds must be an array of circuit ids" },
+        { status: 400 },
+      );
+    }
+    if (payload.circuitIds.length > maxCircuitIds) {
+      return NextResponse.json(
+        { error: "circuitIds contains too many circuit ids" },
+        { status: 400 },
+      );
+    }
+    if (payload.circuitIds.some((id) => typeof id !== "string")) {
+      return NextResponse.json(
+        { error: "circuitIds must be an array of circuit ids" },
+        { status: 400 },
+      );
+    }
+    requestedCircuitIds = Array.from(new Set(payload.circuitIds));
+  }
+
+  let remainingCircuitIds: string[] | undefined;
+  if (payload.remainingCircuitIds !== undefined) {
+    if (!Array.isArray(payload.remainingCircuitIds)) {
+      return NextResponse.json(
+        { error: "remainingCircuitIds must be an array of circuit ids" },
+        { status: 400 },
+      );
+    }
+    if (payload.remainingCircuitIds.length > maxCircuitIds) {
+      return NextResponse.json(
+        { error: "remainingCircuitIds contains too many circuit ids" },
+        { status: 400 },
+      );
+    }
+    if (payload.remainingCircuitIds.some((id) => typeof id !== "string")) {
+      return NextResponse.json(
+        { error: "remainingCircuitIds must be an array of circuit ids" },
+        { status: 400 },
+      );
+    }
+    remainingCircuitIds = Array.from(
+      new Set(payload.remainingCircuitIds),
+    );
+    const configuredIds = new Set(config.circuits.map((circuit) => circuit.id));
+    const unknownRemaining = remainingCircuitIds.find(
+      (id) => !configuredIds.has(id),
+    );
+    if (unknownRemaining) {
+      return NextResponse.json(
+        { error: `Circuit not found: ${unknownRemaining}` },
+        { status: 404 },
+      );
+    }
+  }
+
+  if (
+    payload.handoffFromCircuitId !== undefined &&
+    typeof payload.handoffFromCircuitId !== "string"
+  ) {
+    return NextResponse.json(
+      { error: "handoffFromCircuitId must be a circuit id" },
+      { status: 400 },
+    );
+  }
+
+  if (payload.handoffFromCircuitId) {
+    if (
+      !config.circuits.some(
+        (circuit) => circuit.id === payload.handoffFromCircuitId,
+      )
+    ) {
+      return NextResponse.json(
+        { error: `Circuit not found: ${payload.handoffFromCircuitId}` },
+        { status: 404 },
+      );
+    }
+    const source = await getCircuitState(payload.handoffFromCircuitId);
+    const involved = source.pendingHandoff?.entries.some(
+      (entry) => entry.participantId === participantId,
+    );
+    if (involved) {
+      // Best-effort but durable: the source circuit keeps any unprocessed
+      // entries in pendingHandoff, so a lock collision or Vercel timeout is
+      // retried by the next involved participant rather than losing anyone.
+      const handoff = await drainCircuitHandoff(
+        payload.handoffFromCircuitId,
+      ).catch((error) => {
+        console.error(
+          "Failed to drain completed-circuit queue handoff:",
+          payload.handoffFromCircuitId,
+          error,
+        );
+        return null;
+      });
+
+      // Do not let browsers recreate the old race by appending themselves while
+      // their ordered entry is still in the source outbox. A short, retryable 409
+      // keeps the transition invisible and preserves the source queue's order.
+      // Participants under a no-show cooldown continue below so the existing gate
+      // can return its useful 429 + Retry-After response instead.
+      if (
+        handoff === null ||
+        (handoff.pendingParticipantIds.includes(participantId) &&
+          !handoff.blockedParticipantIds.includes(participantId))
+      ) {
+        return NextResponse.json(
+          { error: "Queue handoff in progress. Please retry." },
+          { status: 409, headers: { "Retry-After": "1" } },
+        );
+      }
+    }
+  }
   const manifest = await getManifest();
   const allCircuits = await getAllCircuitStates();
 
@@ -95,8 +219,8 @@ export async function POST(request: NextRequest) {
       config.circuits,
       allCircuits,
     );
-  } else if (Array.isArray(payload.circuitIds)) {
-    resolvedIds = payload.circuitIds;
+  } else if (requestedCircuitIds) {
+    resolvedIds = requestedCircuitIds;
   } else {
     return NextResponse.json(
       { error: "Invalid queue payload" },
@@ -235,6 +359,10 @@ export async function POST(request: NextRequest) {
       );
       if (existing) {
         existing.joinedAt = now;
+        if (remainingCircuitIds !== undefined) {
+          existing.remainingCircuitIds = remainingCircuitIds;
+        }
+        existing.handoffGraceUntil = undefined;
       }
 
       circuit.queue = pruneExpiredEntries(
@@ -284,6 +412,7 @@ export async function POST(request: NextRequest) {
           participantId,
           joinedAt: now,
           publicToken: runToken,
+          remainingCircuitIds,
         });
         index = circuit.queue.length - 1;
       }
@@ -369,7 +498,23 @@ export async function GET(request: NextRequest) {
       { status: 404 },
     );
   }
-  const circuit = await getCircuitState(circuitId);
+  // Keep the hot polling path to one KV read. Only completed circuits with a
+  // real outbox pay for a drain and re-read; active circuits never invoke the
+  // migration machinery on every 6s position poll.
+  let circuit = await getCircuitState(circuitId);
+  const involvedInHandoff = circuit.pendingHandoff?.entries.some(
+    (entry) => entry.participantId === participantId,
+  );
+  if (involvedInHandoff) {
+    await drainCircuitHandoff(circuitId).catch((error) => {
+      console.error(
+        "Failed to drain completed-circuit queue handoff:",
+        circuitId,
+        error,
+      );
+    });
+    circuit = await getCircuitState(circuitId);
+  }
 
   // The circuit reached its target while this participant was waiting. Tell the
   // client to move on instead of holding them in a line that will never advance:

@@ -747,12 +747,34 @@ export async function POST(
       circuit.chainHash = chainHash;
       circuit.queue.shift();
       // If this contribution just reached the target, the circuit can accept no
-      // more (isCircuitActive is now false). Drop everyone still waiting so we
-      // don't leave a permanent ghost queue on a done circuit — their clients are
-      // told to move on by GET /queue's `complete` signal. Without this the queue
-      // is never pruned again (no write path touches a full circuit) and the
-      // status dashboard shows waiters on a completed circuit forever.
+      // more (isCircuitActive is now false). Atomically move everyone still
+      // waiting into a durable outbox on this circuit before clearing the visible
+      // queue. Request-driven Vercel functions drain that outbox into later
+      // circuits. If a function stops between destination writes, participant-id
+      // dedupe makes the next drain safe; no browser is solely responsible for
+      // recreating the queue.
       if (circuit.totalContributions >= circuitConfig.targetContributions) {
+        const previousPending = circuit.pendingHandoff?.entries ?? [];
+        const waitingByParticipant = new Map(
+          [...previousPending, ...circuit.queue].map((entry) => [
+            entry.participantId,
+            {
+              ...entry,
+              activeSince: undefined,
+              claimedAt: undefined,
+              handoffGraceUntil: undefined,
+            },
+          ]),
+        );
+        if (waitingByParticipant.size > 0) {
+          circuit.pendingHandoff = {
+            id:
+              circuit.pendingHandoff?.id ??
+              `${id}:${circuit.totalContributions}:${timestamp}`,
+            createdAt: circuit.pendingHandoff?.createdAt ?? timestamp,
+            entries: Array.from(waitingByParticipant.values()),
+          };
+        }
         circuit.queue = [];
       }
       circuit.currentZkeyPath = contribution.storedPathname;
