@@ -7,10 +7,12 @@ import {
   getParticipantContributedCircuitIds,
   isCeremonyActive,
   kvKey,
+  mintContributorToken,
   noShowKey,
   pruneExpiredEntries,
   reconcileFront,
   resolveMaxActiveSeconds,
+  runTokenKey,
   selectCircuitsForTier,
 } from "@/lib/ceremony-state";
 import {
@@ -22,12 +24,18 @@ import {
 import { getParticipant } from "@/lib/participant-auth";
 import {
   acquireLock,
+  getJson,
   getLockTtlSeconds,
   incrementWithTtl,
   readCounter,
   releaseLock,
+  setJson,
   writeCircuitStateFenced,
 } from "@/lib/kv-store";
+
+// A run token outlives a full 27-circuit run, then self-expires. Generous margin
+// over the slowest runs so a contributor keeps one handle the whole way through.
+const RUN_TOKEN_TTL_SECONDS = 24 * 60 * 60;
 
 type QueuePosition = {
   participantId: string;
@@ -188,6 +196,20 @@ export async function POST(request: NextRequest) {
 
   const now = Date.now();
   const positions: QueuePosition[] = [];
+
+  // Resolved lazily and at most once per request, only when a new entry is created
+  // (never on a heartbeat, which already carries the token) — so the extra KV read
+  // is paid ~once per circuit the participant newly joins, not on every poll.
+  let runToken: string | null = null;
+  const resolveRunToken = async (): Promise<string> => {
+    const key = runTokenKey(config, participantId);
+    const stored = await getJson<{ token: string }>(key);
+    if (stored?.token) return stored.token;
+    const minted = mintContributorToken();
+    await setJson(key, { token: minted }, RUN_TOKEN_TTL_SECONDS);
+    return minted;
+  };
+
   for (const circuitId of resolvedIds) {
     const lockKey = `${config.storage.manifestPath}:lock:${circuitId}`;
     const lockToken = crypto.randomUUID();
@@ -257,9 +279,11 @@ export async function POST(request: NextRequest) {
       );
 
       if (index === -1) {
+        runToken ??= await resolveRunToken();
         circuit.queue.push({
           participantId,
           joinedAt: now,
+          publicToken: runToken,
         });
         index = circuit.queue.length - 1;
       }

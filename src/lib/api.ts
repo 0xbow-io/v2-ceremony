@@ -2,8 +2,10 @@ export interface CircuitStatus {
   circuitId: string;
   targetContributions: number;
   totalContributions: number;
-  // "active" when a circuit has a contributor, else null — never a participant id.
+  // Opaque random handle for the active contributor, never an identity; null when none.
   currentParticipant: string | null;
+  // Epoch ms the current contributor reached the front, or null.
+  activeSince: number | null;
   queueLength: number;
   latestContributionHash: string | null;
   chainHash: string;

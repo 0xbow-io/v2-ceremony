@@ -362,6 +362,7 @@ export const ceremonyConfig: CeremonyConfig = {
     participantsIndexPath: "ceremony:contributions:participants:index",
     zkeyPrefix: "ppv2-tsc-test/zkeys",
     noShowPrefix: "ceremony:noshow",
+    runTokenPrefix: "ceremony:runtoken",
   },
   copy: defaultCopy,
 };

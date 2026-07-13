@@ -95,8 +95,8 @@ npx --yes -p node@20 -p @wonderland/cabure-cli@1.0.0 \
 > - On a **busy queue** you get `Not in queue` before you ever reach the front —
 >   your slot expired while you waited behind others (deposit alone can be 20+ deep).
 > - On a **long compute** (`transact_5x*`) you get `Not at front of the queue` on
->   submit, or the run stalls for minutes with your id stuck as the circuit's
->   `currentParticipant`.
+>   submit, or the run stalls for minutes while the circuit's `currentParticipant`
+>   stays occupied (an opaque handle — the status never publishes who is at the front).
 >
 > **Do not wait it out — it won't self-clear.** Fix it by running a tiny background
 > heartbeat that re-POSTs your slot every 90s for the ONE circuit you're on, and

@@ -215,6 +215,8 @@ export interface CeremonyConfig {
     zkeyPrefix: string;
     // Prefix for the per-participant per-circuit no-show counter keys.
     noShowPrefix: string;
+    // Prefix for the per-participant opaque run-token keys (see QueueEntry.publicToken).
+    runTokenPrefix: string;
   };
   copy: CeremonyCopy;
 }

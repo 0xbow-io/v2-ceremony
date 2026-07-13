@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { generateInitialZkey } from "@wonderland/cabure-crypto";
@@ -58,6 +58,11 @@ export interface QueueEntry {
   // so a slow-but-live contributor is never skipped. Only the front entry
   // carries it. See reconcileFront.
   claimedAt?: number;
+  // Opaque random handle for this contributor's run, stable across the circuits
+  // they contribute to and never derived from their identity. The public status
+  // exposes it only while this entry is the active slot, so consumers can tell
+  // contributors apart — and follow one across circuits — without identifying them.
+  publicToken?: string;
 }
 
 export interface CircuitState {
@@ -372,6 +377,20 @@ export function createCircuitState(options: {
     headContributionHash: null,
     csHash: options.csHash,
   };
+}
+
+// Opaque public handle for a contributor's run (see QueueEntry.publicToken).
+export function mintContributorToken(): string {
+  return `c_${randomUUID().replace(/-/g, "")}`;
+}
+
+// KV key holding a participant's opaque run token, so it stays stable across the
+// circuits they contribute to one after another.
+export function runTokenKey(
+  config: CeremonyConfig,
+  participantId: string,
+): string {
+  return kvKey(config.storage.runTokenPrefix, participantId);
 }
 
 export function pruneExpiredEntries(

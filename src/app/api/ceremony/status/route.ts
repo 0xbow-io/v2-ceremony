@@ -16,16 +16,18 @@ export async function GET() {
     const circuitConfig = config.circuits.find((c) => c.id === circuit.id);
     const target = circuitConfig?.targetContributions ?? 0;
     const isComplete = circuit.totalContributions >= target;
+    // Front-of-queue entry (the active contributor) on a still-open circuit only.
+    const activeEntry = !isComplete ? circuit.queue[0] : undefined;
     return {
       circuitId: circuit.id,
       targetContributions: target,
       totalContributions: circuit.totalContributions,
-      // Whether a circuit has an active contributor — NOT who. Was the front's
-      // participantId (a github:<id> resolvable to a real profile); now a
-      // non-identifying sentinel so consumers keep their active/waiting signal. A
-      // completed circuit has no active contributor even if a stale entry lingers
-      // in state.
-      currentParticipant: !isComplete && circuit.queue[0] ? "active" : null,
+      // Opaque random handle for the active contributor, never an identity. Null
+      // when no one is active or the entry predates the token.
+      currentParticipant: activeEntry?.publicToken ?? null,
+      // Epoch ms the current contributor reached the front, for measuring how long
+      // they have held the slot. Not reconciled here (cached read path).
+      activeSince: activeEntry?.activeSince ?? null,
       // A completed circuit accepts no contributions, so its queue is meaningless
       // — report 0 rather than any stale entries left from before it filled (the
       // contribute path clears them going forward, but older completed circuits
